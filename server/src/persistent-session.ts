@@ -189,10 +189,11 @@ export class PersistentSession {
     this.paused = false;
     this.resize(cols, rows);
 
-    // Compute replay window. Cold attach (since=undefined) means "send no
-    // backlog" — the client wants a fresh-looking screen, just starting
-    // from now.
-    const requested = since ?? this.buffer.tailSeq;
+    // Compute replay window. Cold attach (since=undefined) replays the full
+    // buffer — without that, a fresh browser tab on a workspace where claude
+    // is already idle would just see a black void instead of the prompt and
+    // recent output. Hot attach (since=N) only fills in what was missed.
+    const requested = since ?? 0;
     const slice = this.buffer.since(requested);
     const scrollbackTruncated = since !== undefined && slice.effectiveSeq > since;
 

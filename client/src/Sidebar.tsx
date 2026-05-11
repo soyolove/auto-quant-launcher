@@ -1,45 +1,25 @@
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import type { FormEvent, ReactElement } from 'react';
 
-import {
-  createWorkspace,
-  deleteWorkspace,
-  listWorkspaces,
-  type Workspace,
-} from './api';
+import { createWorkspace, deleteWorkspace, type Workspace } from './api';
 
-const LIST_POLL_MS = 5000;
 const TAG_HINT = 'a-z, 0-9, "-", "_", up to 33 chars';
 const TAG_RE = /^[a-z0-9][a-z0-9_-]{0,32}$/;
 
 export interface SidebarProps {
+  readonly workspaces: readonly Workspace[];
+  readonly listError: string | null;
   readonly selectedId: string | null;
   readonly onSelect: (id: string) => void;
+  /** Called after a successful create or delete so the parent can refetch. */
+  readonly onChanged: () => void;
 }
 
 export function Sidebar(props: SidebarProps): ReactElement {
-  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [tag, setTag] = useState('');
   const [createError, setCreateError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
-
-  const refresh = async (): Promise<void> => {
-    try {
-      const list = await listWorkspaces();
-      setWorkspaces(list);
-      setLoadError(null);
-    } catch (err) {
-      setLoadError((err as Error).message);
-    }
-  };
-
-  useEffect(() => {
-    void refresh();
-    const id = setInterval(() => void refresh(), LIST_POLL_MS);
-    return () => clearInterval(id);
-  }, []);
 
   const submit = async (e: FormEvent<HTMLFormElement>): Promise<void> => {
     e.preventDefault();
@@ -54,7 +34,7 @@ export function Sidebar(props: SidebarProps): ReactElement {
     setCreating(false);
     if (result.ok) {
       setTag('');
-      await refresh();
+      props.onChanged();
       props.onSelect(result.workspace.id);
     } else {
       const msg =
@@ -69,7 +49,7 @@ export function Sidebar(props: SidebarProps): ReactElement {
     if (!window.confirm('Delete workspace? (registry only — files on disk are kept.)')) return;
     const ok = await deleteWorkspace(id);
     if (ok) {
-      await refresh();
+      props.onChanged();
       if (props.selectedId === id) props.onSelect('');
     }
   };
@@ -107,11 +87,11 @@ export function Sidebar(props: SidebarProps): ReactElement {
       {createError && <div className="sidebar-error">{createError}</div>}
 
       <ul className="sidebar-list">
-        {workspaces.length === 0 && !loadError && (
+        {props.workspaces.length === 0 && !props.listError && (
           <li className="sidebar-empty">no workspaces yet</li>
         )}
-        {loadError && <li className="sidebar-error">{loadError}</li>}
-        {workspaces.map((w) => (
+        {props.listError && <li className="sidebar-error">{props.listError}</li>}
+        {props.workspaces.map((w) => (
           <li
             key={w.id}
             className={`sidebar-row ${w.id === props.selectedId ? 'is-selected' : ''}`}

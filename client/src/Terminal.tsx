@@ -42,6 +42,8 @@ export type KeyMap = Readonly<Record<string, string>>;
 export interface TerminalViewProps {
   /** Session id used for both the persistent-session lookup and lastSeq key. */
   readonly wsId?: string;
+  /** Human-facing label shown in the terminal header. Falls back to wsId. */
+  readonly label?: string;
   /** WebSocket URL base. Defaults to `${ws/wss}://${location.host}/pty`. */
   readonly wsUrl?: string;
   /**
@@ -221,7 +223,7 @@ export function TerminalView(props: TerminalViewProps): ReactElement {
     <div className="terminal-shell">
       <header className="terminal-header">
         <StatusDot status={status} />
-        <span className="terminal-title">{wsId}</span>
+        <span className="terminal-title">{props.label ?? wsId}</span>
         <span className="terminal-meta">
           {pid !== null ? `pid ${pid}` : ''}
           {childExited ? ' · child exited' : ''}

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
 
+import { listWorkspaces, type Workspace } from './api';
 import { Sidebar } from './Sidebar';
 import type { KeyMap } from './Terminal';
 import { WorkspaceView } from './WorkspaceView';
@@ -14,6 +15,7 @@ const APP_KEY_MAP: KeyMap = {
   'shift+enter': '\x1b\r',
 };
 
+const LIST_POLL_MS = 5000;
 const HASH_PREFIX = '#/w/';
 
 function readSelectedFromHash(): string | null {
@@ -37,6 +39,24 @@ function writeSelectedToHash(id: string | null): void {
 
 export function App(): ReactElement {
   const [selectedId, setSelectedId] = useState<string | null>(readSelectedFromHash());
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [listError, setListError] = useState<string | null>(null);
+
+  const refresh = async (): Promise<void> => {
+    try {
+      const list = await listWorkspaces();
+      setWorkspaces(list);
+      setListError(null);
+    } catch (err) {
+      setListError((err as Error).message);
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+    const id = setInterval(() => void refresh(), LIST_POLL_MS);
+    return () => clearInterval(id);
+  }, []);
 
   useEffect(() => {
     const onHashChange = (): void => {
@@ -52,15 +72,28 @@ export function App(): ReactElement {
     setSelectedId(next);
   };
 
+  const selected = selectedId ? workspaces.find((w) => w.id === selectedId) : undefined;
+
   return (
     <main className="app">
-      <Sidebar selectedId={selectedId} onSelect={select} />
+      <Sidebar
+        workspaces={workspaces}
+        listError={listError}
+        selectedId={selectedId}
+        onSelect={select}
+        onChanged={() => void refresh()}
+      />
       <section className="main-pane">
         {selectedId ? (
-          <WorkspaceView key={selectedId} wsId={selectedId} keyMap={APP_KEY_MAP} />
+          <WorkspaceView
+            key={selectedId}
+            wsId={selectedId}
+            label={selected?.tag ?? selectedId}
+            keyMap={APP_KEY_MAP}
+          />
         ) : (
           <div className="empty-pane">
-            <h2>web-terminal</h2>
+            <h2>auto-quant launcher</h2>
             <p>Select a workspace from the sidebar, or create one with the form above.</p>
           </div>
         )}
