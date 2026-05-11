@@ -108,13 +108,17 @@ export function TerminalView(props: TerminalViewProps): ReactElement {
     let lastCols = term.cols;
     let lastRows = term.rows;
 
-    const since = loadLastSeq(wsId);
+    // Always cold attach: each TerminalView mount creates a fresh xterm
+    // instance with no in-memory history, so the server must replay the full
+    // buffer every time. (An earlier `since=<lastSeq>` localStorage scheme
+    // was wrong: it would correctly skip bytes the xterm already had, but
+    // since the xterm was newly mounted there were none to skip — the user
+    // ended up with a blank pane after switching workspaces.)
     const params = new URLSearchParams({
       ws: wsId,
       cols: String(lastCols),
       rows: String(lastRows),
     });
-    if (since !== undefined) params.set('since', String(since));
     const url = `${wsUrl ?? defaultWsUrl()}?${params.toString()}`;
     const ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';
@@ -166,10 +170,9 @@ export function TerminalView(props: TerminalViewProps): ReactElement {
           case 'attached':
             setPid(msg.pid);
             setScrollbackTruncated(msg.scrollbackTruncated);
-            persistLastSeq(wsId, msg.seq);
             break;
           case 'cursor':
-            persistLastSeq(wsId, msg.seq);
+            // No-op for now — see comment above on the URL `since` removal.
             break;
           case 'lifecycle':
             if (msg.kind === 'child-exit') {
@@ -281,23 +284,3 @@ function keySignature(ev: KeyboardEvent): string {
   return parts.join('+');
 }
 
-const SEQ_STORAGE_PREFIX = 'wt:lastSeq:';
-
-function loadLastSeq(wsId: string): number | undefined {
-  try {
-    const raw = window.localStorage.getItem(SEQ_STORAGE_PREFIX + wsId);
-    if (raw === null) return undefined;
-    const n = Number.parseInt(raw, 10);
-    return Number.isFinite(n) && n >= 0 ? n : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function persistLastSeq(wsId: string, seq: number): void {
-  try {
-    window.localStorage.setItem(SEQ_STORAGE_PREFIX + wsId, String(seq));
-  } catch {
-    // localStorage may be disabled; persistence is best-effort.
-  }
-}
