@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "launcher-test": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${AQ_LAUNCHER_REPO_ROOT}/server/scripts/mcp-test-server.mjs"],
+      "env": {
+        "WS_ID": "${AQ_WS_ID:-unknown}"
+      }
+    }
+  }
+}

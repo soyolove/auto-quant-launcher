@@ -78,9 +78,24 @@ body {
 
 .sidebar-create {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
+}
+.sidebar-template-select {
+  flex: 1 1 100%;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.sidebar-template-select:focus {
+  outline: none;
+  border-color: var(--accent);
 }
 .sidebar-create input {
   flex: 1 1 auto;

@@ -1,13 +1,19 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { FormEvent, ReactElement } from 'react';
 
-import { createWorkspace, deleteWorkspace, type Workspace } from './api';
+import {
+  createWorkspace,
+  deleteWorkspace,
+  type TemplateInfo,
+  type Workspace,
+} from './api';
 
 const TAG_HINT = 'a-z, 0-9, "-", "_", up to 33 chars';
 const TAG_RE = /^[a-z0-9][a-z0-9_-]{0,32}$/;
 
 export interface SidebarProps {
   readonly workspaces: readonly Workspace[];
+  readonly templates: readonly TemplateInfo[];
   readonly listError: string | null;
   readonly selectedId: string | null;
   readonly onSelect: (id: string) => void;
@@ -18,8 +24,17 @@ export interface SidebarProps {
 export function Sidebar(props: SidebarProps): ReactElement {
   const [creating, setCreating] = useState(false);
   const [tag, setTag] = useState('');
+  const [template, setTemplate] = useState<string>('');
   const [createError, setCreateError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+
+  // Default template = 'chat' if available, else first alphabetical.
+  useEffect(() => {
+    if (template !== '') return;
+    if (props.templates.length === 0) return;
+    const preferred = props.templates.find((t) => t.name === 'chat');
+    setTemplate((preferred ?? props.templates[0]!).name);
+  }, [props.templates, template]);
 
   const submit = async (e: FormEvent<HTMLFormElement>): Promise<void> => {
     e.preventDefault();
@@ -28,9 +43,13 @@ export function Sidebar(props: SidebarProps): ReactElement {
       setCreateError(`invalid tag (${TAG_HINT})`);
       return;
     }
+    if (template === '') {
+      setCreateError('no template selected');
+      return;
+    }
     setCreating(true);
     setCreateError(null);
-    const result = await createWorkspace(t);
+    const result = await createWorkspace(t, template);
     setCreating(false);
     if (result.ok) {
       setTag('');
@@ -69,6 +88,19 @@ export function Sidebar(props: SidebarProps): ReactElement {
       </div>
 
       <form className="sidebar-create" onSubmit={submit}>
+        {props.templates.length > 1 && (
+          <select
+            className="sidebar-template-select"
+            value={template}
+            onChange={(e) => setTemplate(e.target.value)}
+            disabled={creating}
+            title={props.templates.find((t) => t.name === template)?.description ?? ''}
+          >
+            {props.templates.map((t) => (
+              <option key={t.name} value={t.name}>{t.name}</option>
+            ))}
+          </select>
+        )}
         <input
           ref={inputRef}
           type="text"

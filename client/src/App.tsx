@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
 
-import { listWorkspaces, type Workspace } from './api';
+import { listTemplates, listWorkspaces, type TemplateInfo, type Workspace } from './api';
 import { Sidebar } from './Sidebar';
 import type { KeyMap } from './Terminal';
 import { WorkspaceView } from './WorkspaceView';
@@ -40,6 +40,7 @@ function writeSelectedToHash(id: string | null): void {
 export function App(): ReactElement {
   const [selectedId, setSelectedId] = useState<string | null>(readSelectedFromHash());
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [templates, setTemplates] = useState<TemplateInfo[]>([]);
   const [listError, setListError] = useState<string | null>(null);
 
   const refresh = async (): Promise<void> => {
@@ -56,6 +57,11 @@ export function App(): ReactElement {
     void refresh();
     const id = setInterval(() => void refresh(), LIST_POLL_MS);
     return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    // Templates don't change at runtime; fetch once on mount.
+    void listTemplates().then(setTemplates).catch(() => setTemplates([]));
   }, []);
 
   useEffect(() => {
@@ -78,6 +84,7 @@ export function App(): ReactElement {
     <main className="app">
       <Sidebar
         workspaces={workspaces}
+        templates={templates}
         listError={listError}
         selectedId={selectedId}
         onSelect={select}

@@ -18,14 +18,22 @@ export interface ServerConfig {
   readonly replayBufferBytes: number;
   /** Launcher state root — registry, workspaces dir, shared data live here. */
   readonly launcherRoot: string;
-  /** Path to the bootstrap script invoked when creating a workspace. */
-  readonly bootstrapScript: string;
-  /** Path to an Auto-Quant clone the bootstrap script reads from. */
+  /** Directory containing one subdirectory per template (each with bootstrap.sh). */
+  readonly templatesDir: string;
+  /**
+   * Legacy fallback: path to a single bootstrap script set via the old
+   * `AQ_BOOTSTRAP_SCRIPT` env var. When present, registered as a synthetic
+   * template named `legacy` so old configurations keep working.
+   */
+  readonly legacyBootstrapScript: string | null;
+  /** Path to an Auto-Quant clone the auto-quant template reads from. */
   readonly templateDir: string;
-  /** Directory holding shared *.feather files (bootstrap symlinks into it). */
+  /** Directory holding shared *.feather files (auto-quant template symlinks into it). */
   readonly sharedDataDir: string;
   /** Bootstrap script kill timeout. */
   readonly bootstrapTimeoutMs: number;
+  /** Absolute path to the launcher repo root (used for `${AQ_LAUNCHER_REPO_ROOT}` expansion). */
+  readonly launcherRepoRoot: string;
 }
 
 const DEFAULT_PORT = 8787;
@@ -69,9 +77,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const launcherRoot = resolve(
     env['AQ_LAUNCHER_ROOT'] ?? join(homedir(), '.auto-quant-launcher'),
   );
-  const bootstrapScript = resolve(
-    env['AQ_BOOTSTRAP_SCRIPT'] ?? defaultBootstrapScript(),
-  );
+  const templatesDir = resolve(env['AQ_TEMPLATES_DIR'] ?? defaultTemplatesDir());
+  const legacyBootstrapScript = env['AQ_BOOTSTRAP_SCRIPT']
+    ? resolve(env['AQ_BOOTSTRAP_SCRIPT'])
+    : null;
   const templateDir = resolve(
     env['AQ_TEMPLATE_DIR'] ?? '/Users/ame/2605dev/Auto-Quant',
   );
@@ -84,6 +93,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     1_000,
     600_000,
   );
+  const launcherRepoRoot = computeLauncherRepoRoot();
 
   return {
     host,
@@ -96,10 +106,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     shutdownTimeoutMs,
     replayBufferBytes,
     launcherRoot,
-    bootstrapScript,
+    templatesDir,
+    legacyBootstrapScript,
     templateDir,
     sharedDataDir,
     bootstrapTimeoutMs,
+    launcherRepoRoot,
   };
 }
 
@@ -135,8 +147,19 @@ function parseIntEnv(raw: string | undefined, fallback: number, lo: number, hi: 
   return n;
 }
 
-function defaultBootstrapScript(): string {
+function defaultTemplatesDir(): string {
   const here = dirname(fileURLToPath(import.meta.url));
-  // src/config.ts → ../scripts/bootstrap-auto-quant.sh
-  return join(here, '..', 'scripts', 'bootstrap-auto-quant.sh');
+  // src/config.ts → ../templates/
+  return join(here, '..', 'templates');
+}
+
+/**
+ * Compute the launcher repo root from this file's location.
+ *   server/src/config.ts → repo root is two levels up from this file's dir
+ *   (../../). Works the same whether the entry point is `tsx src/index.ts`
+ *   or a compiled `dist/index.js` because both keep the same relative shape.
+ */
+function computeLauncherRepoRoot(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return resolve(here, '..', '..');
 }

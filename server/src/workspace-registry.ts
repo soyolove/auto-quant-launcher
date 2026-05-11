@@ -12,6 +12,8 @@ export interface WorkspaceMeta {
   readonly dir: string;
   /** ISO timestamp. */
   readonly createdAt: string;
+  /** Template that created this workspace. Optional for backward compatibility with pre-templates entries. */
+  readonly template?: string;
 }
 
 interface FileShape {
@@ -125,11 +127,12 @@ function validateFile(value: unknown): WorkspaceMeta[] {
     ) {
       throw new Error(`workspaces.json: entry ${i} has wrong shape`);
     }
-    return {
+    const base: WorkspaceMeta = {
       id: e['id'],
       tag: e['tag'],
       dir: e['dir'],
       createdAt: e['createdAt'],
     };
+    return typeof e['template'] === 'string' ? { ...base, template: e['template'] } : base;
   });
 }

@@ -10,6 +10,7 @@ import { gitLog, gitStatus } from './git-service.js';
 import { logger } from './logger.js';
 import { SessionPool } from './session-pool.js';
 import { buildSpawnEnv } from './spawn-env.js';
+import { TemplateRegistry } from './template-registry.js';
 import { WorkspaceCreator } from './workspace-creator.js';
 import { WorkspaceRegistry, type WorkspaceMeta } from './workspace-registry.js';
 
@@ -26,12 +27,30 @@ const registry = await WorkspaceRegistry.load(
   logger.child({ scope: 'registry' }),
 );
 
+const templates = await TemplateRegistry.load(
+  config.templatesDir,
+  logger.child({ scope: 'templates' }),
+);
+if (config.legacyBootstrapScript) {
+  logger.warn('config.legacy_bootstrap_script', {
+    script: config.legacyBootstrapScript,
+    note: 'AQ_BOOTSTRAP_SCRIPT is honored as synthetic template `legacy`; migrate by moving the script under AQ_TEMPLATES_DIR/<name>/bootstrap.sh.',
+  });
+  templates.registerSynthetic({
+    name: 'legacy',
+    description: 'legacy AQ_BOOTSTRAP_SCRIPT entry — migrate to a real template',
+    bootstrapScript: config.legacyBootstrapScript,
+    filesDir: '',
+  });
+}
+
 const creator = new WorkspaceCreator({
   workspacesRoot: `${config.launcherRoot}/workspaces`,
-  bootstrapScript: config.bootstrapScript,
+  templateRegistry: templates,
   bootstrapEnv: {
     templateDir: config.templateDir,
     sharedDataDir: config.sharedDataDir,
+    launcherRepoRoot: config.launcherRepoRoot,
   },
   bootstrapTimeoutMs: config.bootstrapTimeoutMs,
   registry,
@@ -45,7 +64,10 @@ const pool = new SessionPool(
     return {
       command: config.command,
       cwd: ws.dir,
-      env: buildSpawnEnv(process.env),
+      env: buildSpawnEnv(process.env, {
+        AQ_WS_ID: wsId,
+        AQ_LAUNCHER_REPO_ROOT: config.launcherRepoRoot,
+      }),
       initialCols: 80,
       initialRows: 24,
       logger: logger.child({ scope: 'session', wsId }),
@@ -80,6 +102,18 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     return sendJson(res, 200, { ok: true });
   }
 
+  if (path === '/api/templates') {
+    if (method === 'GET') {
+      return sendJson(res, 200, {
+        templates: templates.list().map((t) => ({
+          name: t.name,
+          ...(t.description !== undefined ? { description: t.description } : {}),
+        })),
+      });
+    }
+    return sendJson(res, 405, { error: 'method_not_allowed' });
+  }
+
   if (path === '/api/workspaces') {
     if (method === 'GET') {
       return sendJson(res, 200, {
@@ -88,16 +122,32 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     }
     if (method === 'POST') {
       const body = await readJsonBody(req);
-      const tag = typeof body === 'object' && body !== null
-        ? (body as Record<string, unknown>)['tag']
-        : undefined;
+      const fields = typeof body === 'object' && body !== null
+        ? (body as Record<string, unknown>)
+        : {};
+      const tag = fields['tag'];
       if (typeof tag !== 'string') {
         return sendJson(res, 400, { error: 'tag_required' });
       }
-      const result = await creator.create(tag);
+      const rawTemplate = fields['template'];
+      let templateName: string;
+      if (typeof rawTemplate === 'string' && rawTemplate.length > 0) {
+        templateName = rawTemplate;
+      } else {
+        const def = templates.defaultName();
+        if (!def) {
+          return sendJson(res, 500, {
+            error: 'no_templates_configured',
+            message: 'no templates discovered; set AQ_TEMPLATES_DIR or AQ_BOOTSTRAP_SCRIPT',
+          });
+        }
+        templateName = def;
+      }
+      const result = await creator.create(tag, templateName);
       if (!result.ok) {
         const status =
           result.code === 'invalid_tag' ? 400
+          : result.code === 'unknown_template' ? 400
           : result.code === 'tag_in_use' ? 409
           : 500;
         return sendJson(res, status, {
@@ -273,9 +323,11 @@ http.listen(config.port, config.host, () => {
     port: config.port,
     command: config.command,
     launcherRoot: config.launcherRoot,
-    bootstrapScript: config.bootstrapScript,
+    templatesDir: config.templatesDir,
+    templates: templates.list().map((t) => t.name),
     templateDir: config.templateDir,
     sharedDataDir: config.sharedDataDir,
+    launcherRepoRoot: config.launcherRepoRoot,
     workspaces: registry.list().length,
     allowedOrigins: config.allowAnyOrigin ? '*' : Array.from(config.allowedOrigins),
   });

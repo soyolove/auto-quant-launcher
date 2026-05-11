@@ -33,7 +33,10 @@ const STRIP_PREFIXES = [
 
 const SELF_VERSION = '0.1.0';
 
-export function buildSpawnEnv(parent: NodeJS.ProcessEnv): { [key: string]: string } {
+export function buildSpawnEnv(
+  parent: NodeJS.ProcessEnv,
+  extras: { [key: string]: string } = {},
+): { [key: string]: string } {
   const out: { [key: string]: string } = {};
   for (const [k, v] of Object.entries(parent)) {
     if (typeof v !== 'string') continue;
@@ -45,6 +48,12 @@ export function buildSpawnEnv(parent: NodeJS.ProcessEnv): { [key: string]: strin
   out['COLORTERM'] = 'truecolor';
   out['TERM_PROGRAM'] = 'web-terminal';
   out['TERM_PROGRAM_VERSION'] = SELF_VERSION;
+  // Caller-supplied per-session env (e.g. AQ_WS_ID, AQ_LAUNCHER_REPO_ROOT)
+  // wins over the inherited env so .mcp.json `${VAR}` expansion at Claude
+  // startup resolves to the right values.
+  for (const [k, v] of Object.entries(extras)) {
+    out[k] = v;
+  }
   return out;
 }
 

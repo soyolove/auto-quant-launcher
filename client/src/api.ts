@@ -10,10 +10,17 @@ export interface Workspace {
   readonly dir: string;
   readonly createdAt: string;
   readonly claudeRunning: boolean;
+  readonly template?: string;
 }
 
 export interface CreateError {
-  readonly error: 'invalid_tag' | 'tag_in_use' | 'tag_required' | 'bootstrap_failed';
+  readonly error:
+    | 'invalid_tag'
+    | 'tag_in_use'
+    | 'tag_required'
+    | 'bootstrap_failed'
+    | 'unknown_template'
+    | 'no_templates_configured';
   readonly message?: string;
   readonly stderr?: string;
 }
@@ -29,11 +36,11 @@ export async function listWorkspaces(): Promise<Workspace[]> {
   return body.workspaces;
 }
 
-export async function createWorkspace(tag: string): Promise<CreateResult> {
+export async function createWorkspace(tag: string, template: string): Promise<CreateResult> {
   const res = await fetch('/api/workspaces', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ tag }),
+    body: JSON.stringify({ tag, template }),
   });
   if (res.ok) {
     const body = (await res.json()) as { workspace: Workspace };
@@ -46,6 +53,18 @@ export async function createWorkspace(tag: string): Promise<CreateResult> {
     err = { error: 'bootstrap_failed', message: `HTTP ${res.status}` };
   }
   return { ok: false, status: res.status, error: err };
+}
+
+export interface TemplateInfo {
+  readonly name: string;
+  readonly description?: string;
+}
+
+export async function listTemplates(): Promise<TemplateInfo[]> {
+  const res = await fetch('/api/templates');
+  if (!res.ok) throw new Error(`list templates failed: ${res.status}`);
+  const body = (await res.json()) as { templates: TemplateInfo[] };
+  return body.templates;
 }
 
 export async function deleteWorkspace(id: string): Promise<boolean> {

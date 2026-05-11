@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
 import type { Logger } from './logger.js';
+import type { TemplateRegistry } from './template-registry.js';
 import type { WorkspaceMeta, WorkspaceRegistry } from './workspace-registry.js';
 
 export interface BootstrapEnv {
@@ -10,11 +11,13 @@ export interface BootstrapEnv {
   readonly templateDir: string;
   /** Path the bootstrap script should symlink user_data/data into. */
   readonly sharedDataDir: string;
+  /** Absolute path to the launcher repo root (for `${AQ_LAUNCHER_REPO_ROOT}` references). */
+  readonly launcherRepoRoot: string;
 }
 
 export interface CreatorOptions {
   readonly workspacesRoot: string;
-  readonly bootstrapScript: string;
+  readonly templateRegistry: TemplateRegistry;
   readonly bootstrapEnv: BootstrapEnv;
   readonly bootstrapTimeoutMs: number;
   readonly registry: WorkspaceRegistry;
@@ -25,7 +28,7 @@ export type CreateResult =
   | { readonly ok: true; readonly workspace: WorkspaceMeta }
   | {
       readonly ok: false;
-      readonly code: 'invalid_tag' | 'tag_in_use' | 'bootstrap_failed';
+      readonly code: 'invalid_tag' | 'tag_in_use' | 'bootstrap_failed' | 'unknown_template';
       readonly message: string;
       readonly stderr?: string;
       readonly exitCode?: number;
@@ -34,17 +37,18 @@ export type CreateResult =
 const TAG_RE = /^[a-z0-9][a-z0-9_-]{0,32}$/;
 
 /**
- * Creates a workspace by invoking a user-provided bootstrap script.
+ * Creates a workspace by invoking the template's bootstrap script.
  *
  * The launcher itself knows nothing about git, branches, or results.tsv —
- * the script encapsulates all that. We give it `tag` + `outDir` + a small
- * env contract (`AQ_TEMPLATE_DIR`, `AQ_SHARED_DATA_DIR`), wait for it to
- * exit 0, and on success append the resulting WorkspaceMeta to the registry.
+ * each template's script encapsulates that. We give it `tag` + `outDir` +
+ * a small env contract (`AQ_TEMPLATE_DIR`, `AQ_SHARED_DATA_DIR`,
+ * `AQ_TEMPLATE_FILES_DIR`, `AQ_LAUNCHER_REPO_ROOT`), wait for exit 0, and
+ * on success append the resulting WorkspaceMeta to the registry.
  */
 export class WorkspaceCreator {
   constructor(private readonly opts: CreatorOptions) {}
 
-  async create(tag: string): Promise<CreateResult> {
+  async create(tag: string, templateName: string): Promise<CreateResult> {
     if (!TAG_RE.test(tag)) {
       return {
         ok: false,
@@ -55,19 +59,29 @@ export class WorkspaceCreator {
     if (this.opts.registry.hasTag(tag)) {
       return { ok: false, code: 'tag_in_use', message: `tag in use: ${tag}` };
     }
+    const template = this.opts.templateRegistry.get(templateName);
+    if (!template) {
+      return {
+        ok: false,
+        code: 'unknown_template',
+        message: `unknown template: ${templateName}`,
+      };
+    }
 
     const id = randomUUID();
     const dir = join(this.opts.workspacesRoot, id);
-    const log = this.opts.logger.child({ tag, id, dir });
+    const log = this.opts.logger.child({ tag, id, dir, template: templateName });
 
-    log.info('bootstrap.start', { script: this.opts.bootstrapScript });
+    log.info('bootstrap.start', { script: template.bootstrapScript });
 
     const result = await runScript(
-      this.opts.bootstrapScript,
+      template.bootstrapScript,
       [tag, dir],
       {
         AQ_TEMPLATE_DIR: this.opts.bootstrapEnv.templateDir,
         AQ_SHARED_DATA_DIR: this.opts.bootstrapEnv.sharedDataDir,
+        AQ_TEMPLATE_FILES_DIR: template.filesDir,
+        AQ_LAUNCHER_REPO_ROOT: this.opts.bootstrapEnv.launcherRepoRoot,
       },
       this.opts.bootstrapTimeoutMs,
     );
@@ -91,6 +105,7 @@ export class WorkspaceCreator {
       tag,
       dir,
       createdAt: new Date().toISOString(),
+      template: templateName,
     };
     await this.opts.registry.add(workspace);
     log.info('bootstrap.ok', { stdout: result.stdout.slice(-400) });
