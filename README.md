@@ -145,103 +145,176 @@ tsconfig.base.json                 ← strict TS settings shared by both package
 
 ---
 
-## 5. The bootstrap script contract
+## 5. Templates — the extension point
 
-This is the **only** extension point. Everything else is launcher infrastructure.
+Everything domain-specific lives in **one directory per template** under `server/templates/`. The launcher's TypeScript code knows nothing about strategies, branches, MCP servers, or chats — that knowledge is encoded as a `bootstrap.sh` (plus optional static asset files) per template.
 
-When you click "create" with tag `T`, the launcher invokes:
+```
+server/templates/
+  <name>/
+    bootstrap.sh          # required; +x
+    template.json         # optional; { "description": "…" }
+    files/                # optional; static assets the script can `cp` from
+      …
+```
+
+Two ship with the launcher:
+
+- **`auto-quant/`** — the original Auto-Quant flow (git clone --local, autoresearch branch, symlinked data, results.tsv header)
+- **`chat/`** — a minimal git directory with a `CLAUDE.md` persona and a `.mcp.json` pointing at the test MCP server (`server/scripts/mcp-test-server.mjs`). The end-to-end proof that MCP injection works (see §6).
+
+The Sidebar's "+ create" form shows a template dropdown whenever more than one template is loaded; the default is `chat` if present, else first alphabetical.
+
+### Bootstrap script contract
+
+When you create a workspace with tag `T` and template `tpl`, the launcher invokes:
 
 ```bash
-$AQ_BOOTSTRAP_SCRIPT  $T  $OUT_DIR
+server/templates/<tpl>/bootstrap.sh   T   <outDir>
 ```
 
 with these env vars set:
 
 | Env var | Meaning |
 | ------- | ------- |
-| `AQ_TEMPLATE_DIR` | What the script should read from (e.g. an Auto-Quant clone, or any source-of-truth dir) |
-| `AQ_SHARED_DATA_DIR` | What the script should symlink shared read-only data from |
+| `AQ_TEMPLATE_FILES_DIR` | Absolute path to this template's `files/` directory. Use `cp $AQ_TEMPLATE_FILES_DIR/foo $OUT_DIR/foo` to drop static assets in. |
+| `AQ_LAUNCHER_REPO_ROOT` | Absolute path to the launcher repo root. Useful when you want `.mcp.json` to reference launcher-shipped scripts (e.g. `$AQ_LAUNCHER_REPO_ROOT/server/scripts/mcp-test-server.mjs`). |
+| `AQ_TEMPLATE_DIR` | Auto-Quant-specific; only meaningful for the auto-quant template. The Auto-Quant source dir to clone from. |
+| `AQ_SHARED_DATA_DIR` | Auto-Quant-specific; the shared `*.feather` directory. |
 
-The script must produce a workspace at `$OUT_DIR` and exit 0. Failure: exit non-zero with a useful message on stderr (the launcher surfaces it to the API caller as `{ error: "bootstrap_failed", stderr: "…" }`).
+The script must produce a workspace at `$OUT_DIR` and exit 0. Non-zero exit becomes `{ error: "bootstrap_failed", stderr: "…" }` to the API caller. The launcher does no further validation — it just registers `{ id, tag, dir, createdAt, template }` after success.
 
-**Minimal contract**: `$OUT_DIR` exists after script exits and is a directory. The launcher does no further validation — it just registers `{ id, tag, dir, createdAt }`.
+### Adding a new template
 
-**Default script (`bootstrap-auto-quant.sh`)** does:
-1. `git clone --local "$AQ_TEMPLATE_DIR" "$OUT_DIR"` — hardlinks `.git/objects`, cheap
-2. `git checkout -b "autoresearch/$tag"`
-3. Symlink `user_data/data` → `$AQ_SHARED_DATA_DIR`
-4. Write `results.tsv` header
-5. Add the symlink path to `.git/info/exclude` so it doesn't show as untracked
+```bash
+mkdir -p server/templates/my-task/files
+cp server/templates/chat/bootstrap.sh server/templates/my-task/bootstrap.sh   # start from the chat template
+$EDITOR server/templates/my-task/bootstrap.sh                                 # adjust whatever assets you copy
+echo '{"description":"My custom task workspace"}' > server/templates/my-task/template.json
+# Add files/CLAUDE.md, files/mcp.json, etc. as needed.
+```
 
-**To add a new task type**, write a new script (e.g. `scripts/bootstrap-asset-tracking.sh`) that produces a different shape of workspace, then set `AQ_BOOTSTRAP_SCRIPT=/path/to/your/script` and restart the server. Or — better — see §6 below for the multi-template direction.
+Restart the server. New template shows up in `GET /api/templates` and in the sidebar dropdown automatically.
+
+### Legacy: single-script mode
+
+`AQ_BOOTSTRAP_SCRIPT=/path/to/script.sh` is still honored — registered as a synthetic template named `legacy`. The launcher logs a warning and keeps working, but the recommended migration is to move the script under `server/templates/<name>/bootstrap.sh` and delete the env var.
 
 ---
 
-## 6. MCP injection (the integration story)
+## 6. MCP injection (the OpenAlice integration story)
 
-The launcher has no concept of "MCP" — but because each workspace is just a directory, you can drop standard MCP config files in there and the CLI agent will pick them up.
+The launcher itself knows nothing about MCP. The mechanism is simple:
 
-For Claude Code, this means writing a `.mcp.json` at the workspace root. The launcher should arrange for this file to exist by the time `claude` is spawned in the cwd.
+1. A workspace template ships a `.mcp.json` (Claude Code's project-scope config) under its `files/` directory
+2. The bootstrap script `cp`s that file into the workspace verbatim
+3. When the launcher later spawns Claude Code in the workspace cwd, Claude Code reads `.mcp.json`, expands `${VAR}` placeholders against its process env, and connects
 
-### Recommended pattern
+**The load-bearing detail**: those `${VAR}` placeholders are expanded by **Claude Code at session start**, not by the bootstrap script at workspace creation. The launcher injects the right env into Claude's process via `spawn-env.ts` (specifically `AQ_LAUNCHER_REPO_ROOT` and `AQ_WS_ID`). Bootstrap env doesn't reach Claude because by then bootstrap has long since exited.
 
-Have your bootstrap script write the `.mcp.json` into the workspace as part of bootstrap. Example for an OpenAlice-style backend exposing tools via MCP:
+### The shipped chat template (read this; the OpenAlice integration is one find/replace away)
 
-```bash
-# in your bootstrap script, after the dir is set up:
-cat > "$OUT_DIR/.mcp.json" <<EOF
+`server/templates/chat/files/mcp.json`:
+
+```json
 {
   "mcpServers": {
-    "openalice": {
+    "launcher-test": {
+      "type": "stdio",
       "command": "node",
-      "args": ["$OPENALICE_MCP_BIN", "--port=stdio"]
+      "args": ["${AQ_LAUNCHER_REPO_ROOT}/server/scripts/mcp-test-server.mjs"],
+      "env": {
+        "WS_ID": "${AQ_WS_ID:-unknown}"
+      }
     }
   }
 }
-EOF
 ```
 
-Or for an HTTP/SSE-based MCP server already running locally:
+`server/templates/chat/bootstrap.sh` (the relevant lines):
+
+```bash
+cp "$AQ_TEMPLATE_FILES_DIR/mcp.json" .mcp.json
+cp "$AQ_TEMPLATE_FILES_DIR/CLAUDE.md" CLAUDE.md
+git init -q && git add . && git -c user.email=launcher@local commit -q -m "chat: $TAG"
+```
+
+The bootstrap **does not** expand `${AQ_LAUNCHER_REPO_ROOT}` — `cp` preserves it literally. Claude Code's docs explicitly support `${VAR}` and `${VAR:-default}` syntax in `command` / `args` / `env` / `url` / `headers`, expanded at session start.
+
+End-to-end verification (already done, see `server/scripts/mcp-test-client.mjs` for standalone): create a chat workspace, attach, click "Trust this folder", run `/mcp` — `launcher-test · ✓ connected · 1 tool`. Ask Claude to call `introduce_self` — response is `I am the launcher-test MCP server. workspace WS_ID=<the workspace's UUID>`.
+
+### Pointing at OpenAlice's MCP server (or anyone else's)
+
+To replace the test server with OpenAlice's (or any domain backend's) MCP server, **fork the chat template and edit `files/mcp.json`**:
+
+**Option A: stdio (Claude Code spawns the MCP server)**
 
 ```json
 {
   "mcpServers": {
     "openalice": {
-      "url": "http://localhost:3002/mcp"
+      "type": "stdio",
+      "command": "node",
+      "args": ["/absolute/path/to/openalice/dist/mcp-server.js"],
+      "env": {
+        "OPENALICE_DATA_DIR": "${HOME}/.openalice",
+        "WS_ID": "${AQ_WS_ID:-unknown}"
+      }
     }
   }
 }
 ```
 
-When `claude` (or any MCP-capable CLI) starts in this workspace, it reads `.mcp.json`, connects to the MCP server, and the agent immediately has all of OpenAlice's exposed tools available — `list_utas`, `get_snapshot`, `stage_order`, etc.
+If OpenAlice ships with the launcher, prefer `${AQ_LAUNCHER_REPO_ROOT}/<relative-path-to-mcp-server>` so the config is portable across clones.
+
+**Option B: HTTP / SSE (OpenAlice is already running, Claude Code connects)**
+
+```json
+{
+  "mcpServers": {
+    "openalice": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:3002/mcp",
+      "headers": {
+        "Authorization": "Bearer ${OPENALICE_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+This shape is what we expect for OpenAlice's current architecture: OpenAlice is a long-running local server that exposes MCP over HTTP. The launcher's job is just to drop the right `.mcp.json` into workspaces.
+
+### Adding your own env-var placeholders
+
+If you need a new `${MY_VAR}` to be expandable in a template's `.mcp.json`, set it in `server/src/index.ts`'s `SessionPool` factory:
+
+```ts
+env: buildSpawnEnv(process.env, {
+  AQ_WS_ID: wsId,
+  AQ_LAUNCHER_REPO_ROOT: config.launcherRepoRoot,
+  MY_VAR: 'whatever',          // ← add here
+}),
+```
+
+`buildSpawnEnv`'s `extras` parameter exists precisely for this — caller-supplied per-session env overlay.
+
+### Claude Code MCP gotchas (paid for in blood, listed here so you don't have to)
+
+- **`.mcp.json` triggers a trust prompt** on first attach to a project-scope workspace. There's no `--mcp-trust` flag; the user clicks once per workspace. To reset the choice, run `claude mcp reset-project-choices` inside the workspace.
+- **stdio MCP servers must not write to stderr during startup**. Claude Code treats any stderr noise during the handshake as a failed connection and the server appears as disconnected forever (or until you fix it and reattach). Don't add `console.error('starting')` "for debug".
+- **`type` is required** in each `mcpServers.<name>` entry (`stdio` / `streamable-http` / `sse`). Skipping it silently breaks the entry.
+- **The MCP server name `workspace` is reserved**. Pick anything else.
+- **Path resolution for `command` and `args` is not specified by docs** to be relative-to-anything. Always use absolute paths, ideally via `${AQ_LAUNCHER_REPO_ROOT}` expansion so the config remains portable.
+
+Reference: https://code.claude.com/docs/en/mcp
 
 ### What the launcher does NOT do (deliberately)
 
-- Doesn't run the MCP server itself. That's the responsibility of whoever owns the domain backend (OpenAlice, etc.)
-- Doesn't manage MCP-server lifecycle. If OpenAlice's MCP server isn't running, the agent inside the workspace will see connection errors — fix it by starting OpenAlice
-- Doesn't validate the `.mcp.json` contents. The CLI agent will reject malformed configs at startup
-
-### Multi-template roadmap (not built yet)
-
-To support multiple kinds of task workspace (`auto-quant`, `asset-tracking`, `macro-weekly`, …) without env-var swapping, the planned shape is:
-
-```
-$LAUNCHER_ROOT/templates/
-  auto-quant/
-    bootstrap.sh
-    CLAUDE.md.tmpl
-    .mcp.json.tmpl
-  asset-tracking/
-    bootstrap.sh
-    CLAUDE.md.tmpl
-    .mcp.json.tmpl
-  …
-
-# API extension:
-POST /api/workspaces  body: { tag, template: "asset-tracking", params: {...} }
-```
-
-The bootstrap script per template renders the `.tmpl` files into the workspace with the params substituted. Sidebar "+" becomes a dropdown of templates. This is a few hours of work and **not done yet** — if you (or the integrator) need it, that's the place to add.
+- Doesn't run the MCP server itself. That's the responsibility of whoever owns the domain backend.
+- Doesn't manage MCP-server lifecycle. If the MCP server is down, Claude Code shows the failed connection in `/mcp`; restart the backend, then `/mcp` to refresh.
+- Doesn't validate `.mcp.json` contents. Claude Code rejects malformed configs at startup.
+- Doesn't pre-approve MCP server trust. The user clicks once.
 
 ---
 
@@ -252,9 +325,10 @@ The bootstrap script per template renders the `.tmpl` files into the workspace w
 | `PORT` | `8787` | Server listen port |
 | `HOST` | `127.0.0.1` | Bind address (use `0.0.0.0` for LAN — also set allowed origins!) |
 | `AQ_LAUNCHER_ROOT` | `$HOME/.auto-quant-launcher` | State root |
-| `AQ_TEMPLATE_DIR` | `/Users/ame/2605dev/Auto-Quant` | Source dir for bootstrap script |
-| `AQ_SHARED_DATA_DIR` | `$LAUNCHER_ROOT/data` | Shared read-only data dir (`*.feather` etc.) |
-| `AQ_BOOTSTRAP_SCRIPT` | `server/scripts/bootstrap-auto-quant.sh` | Script invoked on workspace create |
+| `AQ_TEMPLATES_DIR` | `server/templates/` | Templates root. Each subdir = one template. |
+| `AQ_TEMPLATE_DIR` | `/Users/ame/2605dev/Auto-Quant` | Auto-Quant-specific: source dir the `auto-quant` template clones from |
+| `AQ_SHARED_DATA_DIR` | `$LAUNCHER_ROOT/data` | Auto-Quant-specific: shared `*.feather` dir the `auto-quant` template symlinks into |
+| `AQ_BOOTSTRAP_SCRIPT` | (unset) | Legacy single-script mode. Honored as a synthetic `legacy` template; prefer migrating to `$AQ_TEMPLATES_DIR/<name>/bootstrap.sh`. |
 | `AQ_BOOTSTRAP_TIMEOUT_MS` | `60000` | Bootstrap script kill timeout |
 | `WEB_TERMINAL_COMMAND` | `["claude"]` | What to spawn inside each workspace. JSON array or whitespace-split argv |
 | `WEB_TERMINAL_ALLOWED_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | WS upgrade Origin allowlist, or `*` to disable |
@@ -271,8 +345,9 @@ All under `/api`, JSON in/out, 127.0.0.1 only (unless `HOST` and `WEB_TERMINAL_A
 
 | Method | Path | Body / Query | Response |
 | ------ | ---- | ------------ | -------- |
+| `GET` | `/api/templates` | — | `{ templates: [{ name, description? }] }` |
 | `GET` | `/api/workspaces` | — | `{ workspaces: WorkspaceMeta[] }`, each with `claudeRunning: boolean` derived from `SessionPool` |
-| `POST` | `/api/workspaces` | `{ tag: string }` | `201 { workspace }` / `400 invalid_tag` / `409 tag_in_use` / `500 bootstrap_failed { stderr }` |
+| `POST` | `/api/workspaces` | `{ tag: string, template?: string }` | `201 { workspace }` / `400 invalid_tag \| unknown_template` / `409 tag_in_use` / `500 bootstrap_failed { stderr }`. Omitting `template` uses `chat` (default if present) or first alphabetical template. |
 | `DELETE` | `/api/workspaces/:id` | `?purge=true` optional | `200 { ok: true, purged: bool }` (default keeps dir, `?purge=true` rm -rf's it) |
 | `GET` | `/api/workspaces/:id/git/log` | `?limit=30` | `{ entries: [{ hash, subject, relTime, authorTime }] }` |
 | `GET` | `/api/workspaces/:id/git/status` | — | `{ branch, clean, files: [{ path, status }] }` (porcelain v1 two-char codes) |
@@ -282,9 +357,10 @@ All under `/api`, JSON in/out, 127.0.0.1 only (unless `HOST` and `WEB_TERMINAL_A
 ```ts
 type WorkspaceMeta = {
   id: string;            // UUID
-  tag: string;           // user-supplied
+  tag: string;           // user-supplied, validated against ^[a-z0-9][a-z0-9_-]{0,32}$
   dir: string;           // absolute path
   createdAt: string;     // ISO timestamp
+  template?: string;     // template the workspace was bootstrapped from (absent on legacy entries)
   claudeRunning: boolean;  // computed from pool
 };
 ```
@@ -329,38 +405,40 @@ Close codes used by the server:
 
 If you want to lift this launcher into another project (e.g. OpenAlice), the simplest paths:
 
-### Option A: copy the workspace as-is
+### Option A: copy the workspace as-is, swap one template
 
-Clone the two packages (`server/` + `client/`) into your monorepo as new workspaces. Adjust `pnpm-workspace.yaml`. Point `AQ_BOOTSTRAP_SCRIPT` at your own bootstrap script that knows your domain. Done.
+Clone the two packages (`server/` + `client/`) into your monorepo as new workspaces, adjust `pnpm-workspace.yaml`, and:
 
-What you'll need to change:
-- `AQ_LAUNCHER_ROOT` default in `server/src/config.ts` (or just set the env)
-- `AQ_TEMPLATE_DIR` default in `server/src/config.ts`
-- Optionally rename: the `WEB_TERMINAL_*` env var prefix and the `auto-quant-launcher` storage dir name aren't load-bearing, just historical
+1. **Copy the `chat` template** to `server/templates/<your-product>/` and edit `files/mcp.json` to point at your MCP server (see §6 for stdio vs HTTP forms).
+2. **Optionally drop the `auto-quant` template** if your product has no use for it.
+3. **Defaults to tweak in `server/src/config.ts`**: `AQ_LAUNCHER_ROOT` (where state lives on disk), `AQ_TEMPLATE_DIR` (Auto-Quant-specific, only matters if you keep that template). The `WEB_TERMINAL_*` env var prefix is just historical naming — rename to taste.
+4. **Run your MCP server**. The launcher doesn't start it for you.
 
-### Option B: extract just the persistence/protocol layer
+That's it. The launcher is content-agnostic; the chat-template-with-MCP pattern is the integration story.
 
-The interesting reusable kernel is:
+### Option B: extract just the persistence/protocol kernel
+
+If the multi-template UI / git / files / sidebar surface isn't what you want, the reusable kernel — useful for any Node + ws project that needs persistent PTY sessions — is:
 
 - `server/src/persistent-session.ts` — PTY decoupled from WS, replay buffer, auto-respawn
 - `server/src/session-pool.ts` — per-id session map
 - `server/src/replay-buffer.ts` — pure data structure, no deps
 - `server/src/protocol.ts` + `client/src/protocol.ts` — the WS protocol
-- `server/src/spawn-env.ts` — env sanitization (you almost certainly want this if spawning CLI agents from a parent shell)
+- `server/src/spawn-env.ts` — env sanitization + per-session env injection (you almost certainly want this if spawning CLI agents from a parent shell — see the `TERM_PROGRAM=vscode` / `CLAUDE_CODE_SSE_PORT` saga in the file header)
 
-These have no Auto-Quant or even "launcher" coupling. Drop them into any Node + ws project that needs persistent PTY sessions.
+These five files have no Auto-Quant, no "launcher", no MCP coupling. Drop them in and write your own surrounding code.
 
 ### What you probably don't want to copy
 
-- `bootstrap-auto-quant.sh` — write your own
-- `server/src/bootstrap-data.ts` — Auto-Quant-specific data seeding
-- The sidebar / git panel / files panel UIs as-is — they're fine but you'll likely want to redesign for your product surface
+- `server/templates/auto-quant/` — Auto-Quant-specific, not yours
+- `server/src/bootstrap-data.ts` — Auto-Quant-specific data seeding (the `.feather` files copy on first boot)
+- `server/scripts/mcp-test-server.mjs` and `mcp-test-client.mjs` — these are demo / sanity-check; replace with your real MCP server. **Read them for the SDK boilerplate** though — they're the minimal correct shape for a stdio MCP server (no stderr noise on startup, `setRequestHandler` for tools/list + tools/call).
+- The sidebar / git panel / files panel UIs as-is — fine for a one-person tool, you'll likely want to redesign for your product surface
 
 ---
 
 ## 11. Deliberately not built (yet)
 
-- Multi-template UI (sidebar dropdown of task types) — see §6
 - `results.tsv`-as-live-table, sharpe charts, any Auto-Quant-specific visualizations
 - Remote access / auth / TLS (localhost only)
 - File editing — agent owns its files; we display only
@@ -368,6 +446,7 @@ These have no Auto-Quant or even "launcher" coupling. Drop them into any Node + 
 - WS auto-reconnect within the same xterm instance (would let `lastSeq` become useful again)
 - Push-based file/git updates (currently 3 s polling); see the memory note on REST-vs-WS-multiplexing for when this should flip
 - Multi-client per workspace (one attached client at a time; second attach kicks first)
+- MCP-server-trust pre-approval — first attach to any workspace prompts the user for `.mcp.json` trust; no `--mcp-trust` flag exists in Claude Code today
 
 ---
 
