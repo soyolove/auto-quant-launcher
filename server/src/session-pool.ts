@@ -59,8 +59,20 @@ export class SessionPool {
     return this.sessions.has(wsId);
   }
 
+  isClaudeRunning(wsId: string): boolean {
+    return this.sessions.has(wsId);
+  }
+
   size(): number {
     return this.sessions.size;
+  }
+
+  dispose(wsId: string, reason: string): boolean {
+    const session = this.sessions.get(wsId);
+    if (!session) return false;
+    session.dispose(reason);
+    // session.dispose triggers onDisposed which removes from the map.
+    return true;
   }
 
   disposeAll(reason: string): void {
