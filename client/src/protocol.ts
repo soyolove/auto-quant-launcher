@@ -3,21 +3,54 @@
  * packages stay independently buildable without a shared workspace.
  */
 
+// ── client → server ─────────────────────────────────────────────────────────
+
+export interface AttachMessage {
+  readonly type: 'attach';
+  readonly wsId: string;
+  readonly cols: number;
+  readonly rows: number;
+  readonly since?: number;
+}
+
 export interface ResizeMessage {
   readonly type: 'resize';
   readonly cols: number;
   readonly rows: number;
 }
 
-export type ClientControlMessage = ResizeMessage;
+export type ClientControlMessage = AttachMessage | ResizeMessage;
 
-export interface ReadyMessage {
-  readonly type: 'ready';
+// ── server → client ─────────────────────────────────────────────────────────
+
+export interface AttachedMessage {
+  readonly type: 'attached';
+  readonly wsId: string;
   readonly pid: number;
   readonly command: readonly string[];
-  readonly cols: number;
-  readonly rows: number;
+  readonly replayFromSeq: number;
+  readonly seq: number;
+  readonly scrollbackTruncated: boolean;
 }
+
+export interface CursorMessage {
+  readonly type: 'cursor';
+  readonly seq: number;
+}
+
+export interface ChildExitLifecycle {
+  readonly type: 'lifecycle';
+  readonly kind: 'child-exit';
+  readonly code: number;
+  readonly signal: number | null;
+}
+
+export interface ChildRespawnLifecycle {
+  readonly type: 'lifecycle';
+  readonly kind: 'child-respawn';
+}
+
+export type LifecycleMessage = ChildExitLifecycle | ChildRespawnLifecycle;
 
 export interface ExitMessage {
   readonly type: 'exit';
@@ -25,7 +58,13 @@ export interface ExitMessage {
   readonly signal: number | null;
 }
 
-export type ServerControlMessage = ReadyMessage | ExitMessage;
+export type ServerControlMessage =
+  | AttachedMessage
+  | CursorMessage
+  | LifecycleMessage
+  | ExitMessage;
+
+// ── parser ──────────────────────────────────────────────────────────────────
 
 export function parseServerControl(text: string): ServerControlMessage | null {
   let value: unknown;
@@ -37,21 +76,43 @@ export function parseServerControl(text: string): ServerControlMessage | null {
   if (typeof value !== 'object' || value === null) return null;
   const v = value as Record<string, unknown>;
   switch (v['type']) {
-    case 'ready':
+    case 'attached':
       if (
+        typeof v['wsId'] === 'string' &&
         typeof v['pid'] === 'number' &&
         Array.isArray(v['command']) &&
         v['command'].every((c) => typeof c === 'string') &&
-        typeof v['cols'] === 'number' &&
-        typeof v['rows'] === 'number'
+        typeof v['replayFromSeq'] === 'number' &&
+        typeof v['seq'] === 'number' &&
+        typeof v['scrollbackTruncated'] === 'boolean'
       ) {
         return {
-          type: 'ready',
+          type: 'attached',
+          wsId: v['wsId'],
           pid: v['pid'],
           command: v['command'] as string[],
-          cols: v['cols'],
-          rows: v['rows'],
+          replayFromSeq: v['replayFromSeq'],
+          seq: v['seq'],
+          scrollbackTruncated: v['scrollbackTruncated'],
         };
+      }
+      return null;
+    case 'cursor':
+      if (typeof v['seq'] === 'number') {
+        return { type: 'cursor', seq: v['seq'] };
+      }
+      return null;
+    case 'lifecycle':
+      if (v['kind'] === 'child-exit' && typeof v['code'] === 'number') {
+        return {
+          type: 'lifecycle',
+          kind: 'child-exit',
+          code: v['code'],
+          signal: typeof v['signal'] === 'number' ? v['signal'] : null,
+        };
+      }
+      if (v['kind'] === 'child-respawn') {
+        return { type: 'lifecycle', kind: 'child-respawn' };
       }
       return null;
     case 'exit':

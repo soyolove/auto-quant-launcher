@@ -5,7 +5,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 
 import { loadConfig, type ServerConfig } from './config.js';
 import { logger } from './logger.js';
-import { PtySession } from './session.js';
+import { SessionPool } from './session-pool.js';
 import { buildSpawnEnv } from './spawn-env.js';
 
 const config = loadConfig();
@@ -21,9 +21,22 @@ const http = createServer((req, res) => {
 });
 
 const wss = new WebSocketServer({ noServer: true });
-const sessions = new Set<PtySession>();
 let shuttingDown = false;
-let nextSessionId = 1;
+
+const pool = new SessionPool(
+  (_wsId) => ({
+    command: config.command,
+    cwd: config.cwd,
+    env: buildSpawnEnv(process.env),
+    initialCols: 80,
+    initialRows: 24,
+    logger: logger.child({ scope: 'session' }),
+    replayBufferBytes: config.replayBufferBytes,
+    highWatermarkBytes: config.bpHighWatermarkBytes,
+    lowWatermarkBytes: config.bpLowWatermarkBytes,
+  }),
+  logger.child({ scope: 'pool' }),
+);
 
 http.on('upgrade', (req, socket, head) => {
   if (shuttingDown) {
@@ -55,36 +68,27 @@ http.on('upgrade', (req, socket, head) => {
 });
 
 wss.on('connection', (ws: WebSocket, req: IncomingMessage, url: URL) => {
+  const wsId = (url.searchParams.get('ws') ?? 'default').slice(0, 64) || 'default';
   const cols = clampQuery(url.searchParams.get('cols'), 80, 1, 1000);
   const rows = clampQuery(url.searchParams.get('rows'), 24, 1, 1000);
-  const sessionId = nextSessionId++;
-  const sessionLog = logger.child({
-    sessionId,
+  const sinceRaw = url.searchParams.get('since');
+  const since = sinceRaw === null ? undefined : parseSince(sinceRaw);
+
+  logger.info('upgrade.accepted', {
+    wsId,
+    cols,
+    rows,
+    since: since ?? null,
     origin: req.headers.origin ?? null,
     remoteAddress: req.socket.remoteAddress ?? null,
   });
 
   try {
-    const session: PtySession = new PtySession(ws, {
-      command: config.command,
-      cwd: config.cwd,
-      env: buildSpawnEnv(process.env),
-      cols,
-      rows,
-      highWatermarkBytes: config.bpHighWatermarkBytes,
-      lowWatermarkBytes: config.bpLowWatermarkBytes,
-      logger: sessionLog,
-      onClose: () => {
-        sessions.delete(session);
-        sessionLog.info('session.closed', { activeSessions: sessions.size });
-      },
-    });
-    sessions.add(session);
-    sessionLog.info('session.opened', { activeSessions: sessions.size });
+    pool.attach(wsId, ws, cols, rows, since);
   } catch (err) {
-    sessionLog.error('session.spawn_failed', { err });
+    logger.error('pool.attach_failed', { wsId, err });
     try {
-      ws.close(1011, 'spawn failed');
+      ws.close(1011, 'attach failed');
     } catch {
       // ignore
     }
@@ -97,6 +101,7 @@ http.listen(config.port, config.host, () => {
     port: config.port,
     command: config.command,
     cwd: config.cwd,
+    replayBufferBytes: config.replayBufferBytes,
     allowedOrigins: config.allowAnyOrigin ? '*' : Array.from(config.allowedOrigins),
   });
 });
@@ -104,9 +109,9 @@ http.listen(config.port, config.host, () => {
 const shutdown = (reason: string): void => {
   if (shuttingDown) return;
   shuttingDown = true;
-  logger.info('server.shutdown', { reason, activeSessions: sessions.size });
+  logger.info('server.shutdown', { reason, activeSessions: pool.size() });
 
-  for (const s of sessions) s.dispose('server shutdown');
+  pool.disposeAll('server shutdown');
   wss.close();
 
   const forceTimer = setTimeout(() => {
@@ -135,8 +140,6 @@ process.on('unhandledRejection', (reason) => {
 function isOriginAllowed(req: IncomingMessage, cfg: ServerConfig): boolean {
   if (cfg.allowAnyOrigin) return true;
   const origin = req.headers.origin;
-  // Same-origin requests (e.g. curl, Node ws client) often omit Origin entirely.
-  // Treat absent Origin as same-origin and allow it — browsers always send one.
   if (typeof origin !== 'string' || origin.length === 0) return true;
   return cfg.allowedOrigins.has(origin);
 }
@@ -147,5 +150,11 @@ function clampQuery(raw: string | null, fallback: number, lo: number, hi: number
   if (!Number.isFinite(n)) return fallback;
   if (n < lo) return lo;
   if (n > hi) return hi;
+  return n;
+}
+
+function parseSince(raw: string): number | undefined {
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0) return undefined;
   return n;
 }

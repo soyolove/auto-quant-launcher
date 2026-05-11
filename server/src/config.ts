@@ -13,6 +13,8 @@ export interface ServerConfig {
   readonly bpLowWatermarkBytes: number;
   /** Time we wait for clean shutdown before forcing the process to exit. */
   readonly shutdownTimeoutMs: number;
+  /** Per-session replay ring-buffer cap, in bytes. */
+  readonly replayBufferBytes: number;
 }
 
 const DEFAULT_PORT = 8787;
@@ -20,6 +22,7 @@ const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_HIGH_WM = 1 * 1024 * 1024; // 1 MiB
 const DEFAULT_LOW_WM = 256 * 1024; // 256 KiB
 const DEFAULT_SHUTDOWN_MS = 5_000;
+const DEFAULT_REPLAY_BYTES = 512 * 1024; // 512 KiB
 
 const DEFAULT_ORIGINS = [
   'http://localhost:5173',
@@ -48,6 +51,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     100,
     60_000,
   );
+  const replayBufferBytes = parseInt(
+    env['WEB_TERMINAL_REPLAY_BYTES'],
+    DEFAULT_REPLAY_BYTES,
+    1024,
+    64 * 1024 * 1024,
+  );
 
   return {
     host,
@@ -59,6 +68,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     bpHighWatermarkBytes: bpHigh,
     bpLowWatermarkBytes: bpLow,
     shutdownTimeoutMs,
+    replayBufferBytes,
   };
 }
 

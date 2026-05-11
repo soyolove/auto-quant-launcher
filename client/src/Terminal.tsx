@@ -13,7 +13,7 @@ import {
 } from './protocol';
 import { darkTheme } from './theme';
 
-type Status = 'connecting' | 'connected' | 'closed' | 'error';
+type Status = 'connecting' | 'connected' | 'closed' | 'error' | 'kicked';
 
 interface ExitInfo {
   readonly code: number;
@@ -40,7 +40,9 @@ interface ExitInfo {
 export type KeyMap = Readonly<Record<string, string>>;
 
 export interface TerminalViewProps {
-  /** WebSocket URL. Defaults to `${ws/wss}://${location.host}/pty`. */
+  /** Session id used for both the persistent-session lookup and lastSeq key. */
+  readonly wsId?: string;
+  /** WebSocket URL base. Defaults to `${ws/wss}://${location.host}/pty`. */
   readonly wsUrl?: string;
   /**
    * Pre-xterm keydown interceptor. See `KeyMap`. Changing this prop does NOT
@@ -53,11 +55,13 @@ export function TerminalView(props: TerminalViewProps): ReactElement {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [status, setStatus] = useState<Status>('connecting');
   const [pid, setPid] = useState<number | null>(null);
+  const [scrollbackTruncated, setScrollbackTruncated] = useState(false);
   const [exitInfo, setExitInfo] = useState<ExitInfo | null>(null);
+  const [childExited, setChildExited] = useState(false);
 
+  const wsId = props.wsId ?? 'default';
   const wsUrl = props.wsUrl;
-  // Hold keyMap in a ref so prop updates don't tear down the WS — the
-  // custom-key handler reads through this ref on every keystroke.
+
   const keyMapRef = useRef<KeyMap | undefined>(props.keyMap);
   keyMapRef.current = props.keyMap;
 
@@ -67,7 +71,9 @@ export function TerminalView(props: TerminalViewProps): ReactElement {
 
     setStatus('connecting');
     setPid(null);
+    setScrollbackTruncated(false);
     setExitInfo(null);
+    setChildExited(false);
 
     const term = new Xterm({
       theme: darkTheme,
@@ -100,7 +106,14 @@ export function TerminalView(props: TerminalViewProps): ReactElement {
     let lastCols = term.cols;
     let lastRows = term.rows;
 
-    const url = `${wsUrl ?? defaultWsUrl()}?cols=${lastCols}&rows=${lastRows}`;
+    const since = loadLastSeq(wsId);
+    const params = new URLSearchParams({
+      ws: wsId,
+      cols: String(lastCols),
+      rows: String(lastRows),
+    });
+    if (since !== undefined) params.set('since', String(since));
+    const url = `${wsUrl ?? defaultWsUrl()}?${params.toString()}`;
     const ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';
 
@@ -113,10 +126,6 @@ export function TerminalView(props: TerminalViewProps): ReactElement {
       if (ws.readyState === WebSocket.OPEN) ws.send(encoder.encode(data));
     };
 
-    // Pre-xterm keydown interceptor. Same architectural role as VSCode's
-    // keybindings.json layer above its terminal: events checked against the
-    // map BEFORE xterm.js sees them; matches send bytes directly to the PTY
-    // and prevent xterm's default handling, misses fall through unchanged.
     term.attachCustomKeyEventHandler((event) => {
       if (event.type !== 'keydown') return true;
       const map = keyMapRef.current;
@@ -151,10 +160,25 @@ export function TerminalView(props: TerminalViewProps): ReactElement {
       if (typeof data === 'string') {
         const msg = parseServerControl(data);
         if (!msg) return;
-        if (msg.type === 'ready') {
-          setPid(msg.pid);
-        } else if (msg.type === 'exit') {
-          setExitInfo({ code: msg.code, signal: msg.signal });
+        switch (msg.type) {
+          case 'attached':
+            setPid(msg.pid);
+            setScrollbackTruncated(msg.scrollbackTruncated);
+            persistLastSeq(wsId, msg.seq);
+            break;
+          case 'cursor':
+            persistLastSeq(wsId, msg.seq);
+            break;
+          case 'lifecycle':
+            if (msg.kind === 'child-exit') {
+              setChildExited(true);
+            } else if (msg.kind === 'child-respawn') {
+              setChildExited(false);
+            }
+            break;
+          case 'exit':
+            setExitInfo({ code: msg.code, signal: msg.signal });
+            break;
         }
         return;
       }
@@ -163,7 +187,11 @@ export function TerminalView(props: TerminalViewProps): ReactElement {
       }
     });
 
-    ws.addEventListener('close', () => setStatus('closed'));
+    ws.addEventListener('close', (ev) => {
+      // Server-side kick uses close code 4001 — separate from generic disconnect.
+      if (ev.code === 4001) setStatus('kicked');
+      else setStatus('closed');
+    });
     ws.addEventListener('error', () => setStatus('error'));
 
     const stdinSub = term.onData(sendStdin);
@@ -187,17 +215,19 @@ export function TerminalView(props: TerminalViewProps): ReactElement {
       webgl?.dispose();
       term.dispose();
     };
-  }, [wsUrl]);
+  }, [wsId, wsUrl]);
 
   return (
     <div className="terminal-shell">
       <header className="terminal-header">
         <StatusDot status={status} />
-        <span className="terminal-title">web-terminal</span>
+        <span className="terminal-title">{wsId}</span>
         <span className="terminal-meta">
           {pid !== null ? `pid ${pid}` : ''}
+          {childExited ? ' · child exited' : ''}
+          {scrollbackTruncated ? ' · scrollback truncated' : ''}
           {exitInfo
-            ? ` · exited code=${exitInfo.code}${
+            ? ` · session ended code=${exitInfo.code}${
                 exitInfo.signal !== null ? ` signal=${exitInfo.signal}` : ''
               }`
             : ''}
@@ -214,6 +244,7 @@ function StatusDot({ status }: { status: Status }): ReactElement {
     connected: '#7ee787',
     closed: '#6e7681',
     error: '#ff7b72',
+    kicked: '#d2a8ff',
   };
   return (
     <span
@@ -238,11 +269,6 @@ function safeFit(fit: FitAddon): void {
   }
 }
 
-/**
- * Build a lookup key like `"ctrl+shift+enter"` from a KeyboardEvent.
- * Modifier order is fixed (ctrl, alt, shift, meta) so the consumer's keyMap
- * never has to worry about how to order them.
- */
 function keySignature(ev: KeyboardEvent): string {
   const parts: string[] = [];
   if (ev.ctrlKey) parts.push('ctrl');
@@ -251,4 +277,25 @@ function keySignature(ev: KeyboardEvent): string {
   if (ev.metaKey) parts.push('meta');
   parts.push(ev.key.toLowerCase());
   return parts.join('+');
+}
+
+const SEQ_STORAGE_PREFIX = 'wt:lastSeq:';
+
+function loadLastSeq(wsId: string): number | undefined {
+  try {
+    const raw = window.localStorage.getItem(SEQ_STORAGE_PREFIX + wsId);
+    if (raw === null) return undefined;
+    const n = Number.parseInt(raw, 10);
+    return Number.isFinite(n) && n >= 0 ? n : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function persistLastSeq(wsId: string, seq: number): void {
+  try {
+    window.localStorage.setItem(SEQ_STORAGE_PREFIX + wsId, String(seq));
+  } catch {
+    // localStorage may be disabled; persistence is best-effort.
+  }
 }
