@@ -64,6 +64,7 @@ export interface ChildExitLifecycle {
 export interface ChildRespawnLifecycle {
   readonly type: 'lifecycle';
   readonly kind: 'child-respawn';
+  readonly pid: number;
 }
 
 export type LifecycleMessage = ChildExitLifecycle | ChildRespawnLifecycle;

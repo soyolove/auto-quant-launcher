@@ -48,6 +48,7 @@ export interface ChildExitLifecycle {
 export interface ChildRespawnLifecycle {
   readonly type: 'lifecycle';
   readonly kind: 'child-respawn';
+  readonly pid: number;
 }
 
 export type LifecycleMessage = ChildExitLifecycle | ChildRespawnLifecycle;
@@ -111,8 +112,8 @@ export function parseServerControl(text: string): ServerControlMessage | null {
           signal: typeof v['signal'] === 'number' ? v['signal'] : null,
         };
       }
-      if (v['kind'] === 'child-respawn') {
-        return { type: 'lifecycle', kind: 'child-respawn' };
+      if (v['kind'] === 'child-respawn' && typeof v['pid'] === 'number') {
+        return { type: 'lifecycle', kind: 'child-respawn', pid: v['pid'] };
       }
       return null;
     case 'exit':

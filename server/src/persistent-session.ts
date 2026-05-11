@@ -25,6 +25,9 @@ export interface PersistentSessionOptions {
 const MAX_DIM = 1000;
 const CURSOR_TICK_MS = 2000;
 const CURSOR_BYTES_INTERVAL = 64 * 1024;
+const RESPAWN_DEBOUNCE_MS = 1000;
+const RESPAWN_WINDOW_MS = 30_000;
+const RESPAWN_WINDOW_LIMIT = 3;
 
 /**
  * A PTY whose lifetime is decoupled from any single WebSocket.
@@ -42,7 +45,7 @@ const CURSOR_BYTES_INTERVAL = 64 * 1024;
  * reattach.
  */
 export class PersistentSession {
-  private readonly term: pty.IPty;
+  private term: pty.IPty;
   private readonly buffer: ReplayBuffer;
   private readonly opts: PersistentSessionOptions;
   private readonly log: Logger;
@@ -54,45 +57,101 @@ export class PersistentSession {
   private messageHandler: ((raw: unknown, isBinary: boolean) => void) | null = null;
   private closeHandler: (() => void) | null = null;
   private errorHandler: (() => void) | null = null;
+  private currentCols: number;
+  private currentRows: number;
+  private respawnTimes: number[] = [];
+  private respawnTimer: NodeJS.Timeout | null = null;
 
   constructor(opts: PersistentSessionOptions) {
     this.opts = opts;
     this.log = opts.logger.child({ wsId: opts.wsId });
     this.buffer = new ReplayBuffer(opts.replayBufferBytes);
+    this.currentCols = clamp(opts.initialCols, 1, MAX_DIM);
+    this.currentRows = clamp(opts.initialRows, 1, MAX_DIM);
 
-    const [argv0, ...args] = opts.command;
-    if (!argv0) throw new Error('command must contain at least one argv element');
-
-    this.term = pty.spawn(argv0, args, {
-      name: 'xterm-256color',
-      cols: clamp(opts.initialCols, 1, MAX_DIM),
-      rows: clamp(opts.initialRows, 1, MAX_DIM),
-      cwd: opts.cwd,
-      env: opts.env,
-      // Raw bytes; xterm.js decodes UTF-8 with proper streaming state.
-      encoding: null,
-    });
-
+    this.term = this.spawnChild();
     this.log.info('session.spawned', {
       pid: this.term.pid,
       command: opts.command,
       cwd: opts.cwd,
     });
+  }
 
-    this.term.onData((data) => this.onPtyData(data as unknown as Buffer | string));
-    this.term.onExit(({ exitCode, signal }) => {
-      this.log.info('session.child_exit', {
-        pid: this.term.pid,
-        code: exitCode,
-        signal: signal ?? null,
-      });
-      this.sendControl({
-        type: 'exit',
-        code: exitCode,
-        signal: typeof signal === 'number' ? signal : null,
-      });
-      this.dispose('child exited');
+  private spawnChild(): pty.IPty {
+    const [argv0, ...args] = this.opts.command;
+    if (!argv0) throw new Error('command must contain at least one argv element');
+
+    const term = pty.spawn(argv0, args, {
+      name: 'xterm-256color',
+      cols: this.currentCols,
+      rows: this.currentRows,
+      cwd: this.opts.cwd,
+      env: this.opts.env,
+      // Raw bytes; xterm.js decodes UTF-8 with proper streaming state.
+      encoding: null,
     });
+
+    term.onData((data) => this.onPtyData(data as unknown as Buffer | string));
+    term.onExit(({ exitCode, signal }) => this.onChildExit(term, exitCode, signal));
+    return term;
+  }
+
+  /**
+   * Child process exited but the session itself is sticking around. We tell
+   * the client (lifecycle child-exit), then schedule a respawn after a short
+   * debounce — unless the child has been crashing too often, in which case
+   * we open the circuit breaker and dispose for real.
+   */
+  private onChildExit(
+    exited: pty.IPty,
+    exitCode: number,
+    signalRaw: number | undefined,
+  ): void {
+    if (this.disposed) return;
+    // Ignore exits from an already-replaced term (paranoia).
+    if (exited !== this.term) return;
+    const signal = typeof signalRaw === 'number' ? signalRaw : null;
+    this.log.info('session.child_exit', {
+      pid: exited.pid,
+      code: exitCode,
+      signal,
+    });
+    this.sendControl({
+      type: 'lifecycle',
+      kind: 'child-exit',
+      code: exitCode,
+      signal,
+    });
+
+    const now = Date.now();
+    this.respawnTimes = this.respawnTimes.filter((t) => now - t < RESPAWN_WINDOW_MS);
+    this.respawnTimes.push(now);
+    if (this.respawnTimes.length > RESPAWN_WINDOW_LIMIT) {
+      this.log.warn('session.respawn_circuit_open', {
+        recentCrashes: this.respawnTimes.length,
+      });
+      this.sendControl({ type: 'exit', code: exitCode, signal });
+      this.dispose('respawn circuit open');
+      return;
+    }
+
+    if (this.respawnTimer) clearTimeout(this.respawnTimer);
+    this.respawnTimer = setTimeout(() => this.respawnNow(), RESPAWN_DEBOUNCE_MS);
+    this.respawnTimer.unref();
+  }
+
+  private respawnNow(): void {
+    this.respawnTimer = null;
+    if (this.disposed) return;
+    try {
+      this.term = this.spawnChild();
+      this.log.info('session.respawned', { pid: this.term.pid });
+      this.sendControl({ type: 'lifecycle', kind: 'child-respawn', pid: this.term.pid });
+    } catch (err) {
+      this.log.error('session.respawn_failed', { err });
+      this.sendControl({ type: 'exit', code: -1, signal: null });
+      this.dispose('respawn failed');
+    }
   }
 
   get pid(): number {
@@ -182,6 +241,10 @@ export class PersistentSession {
     if (this.cursorTimer) {
       clearInterval(this.cursorTimer);
       this.cursorTimer = null;
+    }
+    if (this.respawnTimer) {
+      clearTimeout(this.respawnTimer);
+      this.respawnTimer = null;
     }
     try {
       this.term.kill();
@@ -297,6 +360,8 @@ export class PersistentSession {
   private resize(cols: number, rows: number): void {
     const c = clamp(Math.floor(cols), 1, MAX_DIM);
     const r = clamp(Math.floor(rows), 1, MAX_DIM);
+    this.currentCols = c;
+    this.currentRows = r;
     try {
       this.term.resize(c, r);
     } catch {
