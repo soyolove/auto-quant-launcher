@@ -3,6 +3,7 @@ import { URL } from 'node:url';
 
 import { WebSocketServer, type WebSocket } from 'ws';
 
+import { ensureSharedData } from './bootstrap-data.js';
 import { loadConfig, type ServerConfig } from './config.js';
 import { listDir, PathTraversal } from './file-service.js';
 import { gitLog, gitStatus } from './git-service.js';
@@ -13,6 +14,12 @@ import { WorkspaceCreator } from './workspace-creator.js';
 import { WorkspaceRegistry, type WorkspaceMeta } from './workspace-registry.js';
 
 const config = loadConfig();
+
+await ensureSharedData({
+  templateDir: config.templateDir,
+  sharedDataDir: config.sharedDataDir,
+  logger: logger.child({ scope: 'data-bootstrap' }),
+});
 
 const registry = await WorkspaceRegistry.load(
   `${config.launcherRoot}/workspaces.json`,
@@ -112,11 +119,22 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
 
     if (sub === null) {
       if (method === 'DELETE') {
+        const purge = url.searchParams.get('purge') === 'true';
         pool.dispose(id, 'workspace deleted');
         const removed = await registry.remove(id);
         if (!removed) return sendJson(res, 404, { error: 'not_found' });
-        logger.info('workspace.removed', { id, dir: removed.dir });
-        return sendJson(res, 200, { ok: true });
+        let purged = false;
+        if (purge) {
+          try {
+            const { rm } = await import('node:fs/promises');
+            await rm(removed.dir, { recursive: true, force: true });
+            purged = true;
+          } catch (err) {
+            logger.error('workspace.purge_failed', { id, dir: removed.dir, err });
+          }
+        }
+        logger.info('workspace.removed', { id, dir: removed.dir, purged });
+        return sendJson(res, 200, { ok: true, purged });
       }
       return sendJson(res, 405, { error: 'method_not_allowed' });
     }

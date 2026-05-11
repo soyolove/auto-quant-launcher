@@ -1,89 +1,168 @@
-# web-terminal
+# auto-quant launcher
 
-A browser-based terminal built the same way VSCode builds its integrated terminal:
+A local browser-based launcher for autonomous LLM agent loops. Built initially around [Auto-Quant](https://github.com/TraderAlice/Auto-Quant)'s research workflow: each "workspace" is a self-contained git checkout with its own branch + agent session.
 
-- **Front-end**: Vite + React + strict TypeScript + [xterm.js](https://xtermjs.org/) (with `fit`, `web-links`, `webgl` addons).
-- **Back-end**: Node.js + [`ws`](https://github.com/websockets/ws) + [`node-pty`](https://github.com/microsoft/node-pty) (real PTY: `forkpty(3)` on macOS/Linux, ConPTY on Windows).
-- **Transport**: WebSocket. Binary frames carry raw PTY bytes both directions; text frames carry small JSON control messages (`resize`).
+**Mental model**: a simplified VSCode optimised for small Harness-shaped projects. The launcher owns the lifecycle (workspace creation, navigation, supervision); the embedded web-terminal is where the agent actually runs.
+
+```
+┌─────────── browser ──────────────────────────────────────────────┐
+│  [ sidebar │ terminal           │ git log    ]                   │
+│            │                    │ git status │                   │
+│            │                    │ file tree  │                   │
+└─────────────────────────────────┬────────────────────────────────┘
+                                  │  HTTP /api/*    WS /pty?ws=…
+                                  ▼
+┌─────────── launcher server (Node, localhost) ────────────────────┐
+│  WorkspaceRegistry  →  $LAUNCHER_ROOT/workspaces.json            │
+│  WorkspaceCreator   →  shells out to a configurable bootstrap    │
+│  SessionPool        →  one PersistentSession per wsId            │
+│                        PTY survives WS disconnect, ring-buffer   │
+│                        replay on reattach, auto-respawn on crash │
+│  GitService / FileService  →  read-only `git -C` + readdir       │
+└─────────────────────────────────┬────────────────────────────────┘
+                                  │
+                                  ▼
+        $HOME/.auto-quant-launcher/
+            workspaces.json
+            data/             ← shared *.feather (seeded once from template)
+            workspaces/<id>/  ← one independent Auto-Quant clone per workspace
+```
+
+## Why it exists
+
+`Auto-Quant`'s README literally tells you to "open a second terminal" for the agent. That works for one experiment at a time on your laptop. Doesn't work if you want:
+
+- multiple parallel runs (manual `git checkout` between them is footguns galore)
+- to close the IDE / put the machine to sleep without killing the agent
+- to monitor from another room or another device
+- to glance at *what changed* lately without staring at the agent's character stream
+
+The launcher solves all four. PTY lives server-side, navigation is by workspace, monitoring is glanceable.
 
 ## Quick start
 
 ```bash
-cd web-terminal
 pnpm install
 pnpm dev
+# open http://localhost:5173
 ```
 
-Then open `http://localhost:5173`. Vite proxies `/pty` to the WebSocket server on `127.0.0.1:8787`.
+First boot: the launcher creates `$HOME/.auto-quant-launcher/`, seeds `data/` from your `AQ_TEMPLATE_DIR` (default `/Users/ame/2605dev/Auto-Quant`) once, and waits. Use the sidebar to create your first workspace.
 
 ## Scripts
 
-- `pnpm dev` — runs server + client in parallel.
-- `pnpm build` — type-checks and bundles both packages.
-- `pnpm typecheck` — strict typecheck only, no emit.
+- `pnpm dev` — server + client in parallel.
+- `pnpm build` — typecheck + build.
+- `pnpm typecheck` — strict typecheck, no emit.
+
+## Configuration (env)
+
+| Variable | Default | Meaning |
+| -------- | ------- | ------- |
+| `PORT` | `8787` | Server listen port. |
+| `HOST` | `127.0.0.1` | Bind address. |
+| `AQ_LAUNCHER_ROOT` | `$HOME/.auto-quant-launcher` | Server state root. |
+| `AQ_TEMPLATE_DIR` | `/Users/ame/2605dev/Auto-Quant` | Where to `git clone --local` workspaces from. |
+| `AQ_SHARED_DATA_DIR` | `$LAUNCHER_ROOT/data` | Holds `.feather` files; each workspace symlinks `user_data/data` here. |
+| `AQ_BOOTSTRAP_SCRIPT` | `server/scripts/bootstrap-auto-quant.sh` | Script the launcher invokes on workspace creation. |
+| `AQ_BOOTSTRAP_TIMEOUT_MS` | `60000` | Bootstrap script kill timeout. |
+| `WEB_TERMINAL_COMMAND` | `["claude"]` | What the PTY launches inside each workspace. JSON array or whitespace argv. |
+| `WEB_TERMINAL_ALLOWED_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | WS-upgrade Origin allowlist (or `*`). |
+| `WEB_TERMINAL_REPLAY_BYTES` | `524288` | Per-session output ring-buffer cap. |
+| `WEB_TERMINAL_BP_HIGH` / `BP_LOW` | `1048576` / `262144` | WS backpressure watermarks. |
+| `WEB_TERMINAL_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error`. |
+
+## Bootstrap script contract
+
+The launcher itself knows nothing about git, branches, or `results.tsv` — that knowledge lives in `AQ_BOOTSTRAP_SCRIPT`. When you create a workspace, the launcher invokes:
+
+```
+$AQ_BOOTSTRAP_SCRIPT <tag> <outDir>
+```
+
+with these env vars set:
+
+- `AQ_TEMPLATE_DIR` — path to the Auto-Quant clone the script should read from
+- `AQ_SHARED_DATA_DIR` — path the script should symlink `user_data/data` into
+
+The script must produce a workspace at `<outDir>` and exit 0. Failure: exit non-zero with a useful message on stderr (the launcher surfaces it to the API caller).
+
+The default `server/scripts/bootstrap-auto-quant.sh` does:
+1. `git clone --local "$AQ_TEMPLATE_DIR" "$outDir"` (hardlinks `.git/objects`, cheap)
+2. `git checkout -b "autoresearch/$tag"`
+3. Symlinks `user_data/data` → `$AQ_SHARED_DATA_DIR`
+4. Writes `results.tsv` header
+5. Adds the symlink path to `.git/info/exclude` so it doesn't appear as untracked
+
+Swap this script (point `AQ_BOOTSTRAP_SCRIPT` elsewhere) to bootstrap a different shape of harness — the launcher doesn't care.
+
+## API
+
+All under `/api/`, JSON, 127.0.0.1 only.
+
+| Method | Path | Meaning |
+| ------ | ---- | ------- |
+| `GET` | `/api/workspaces` | List all workspaces with `claudeRunning` derived from the SessionPool. |
+| `POST` | `/api/workspaces` | Body `{ "tag": "..." }`. 201 / 409 (`tag_in_use`) / 400 (`invalid_tag`). |
+| `DELETE` | `/api/workspaces/:id` | Deregister; `?purge=true` also `rm -rf`s the directory. |
+| `GET` | `/api/workspaces/:id/git/log?limit=N` | Last N commits, hash/subject/relTime/authorTime. |
+| `GET` | `/api/workspaces/:id/git/status` | Current branch + porcelain file list. |
+| `GET` | `/api/workspaces/:id/files?path=…` | One level of directory listing (no recursion). |
+
+WebSocket: `ws://host/pty?ws=<id>&cols=N&rows=N&since=<seq>`. `since` is optional; absent = cold attach with no replay.
+
+## Wire protocol (terminal)
+
+Binary frames carry raw PTY bytes both directions (no UTF-8 round-trip on the server side; xterm.js's streaming decoder handles CJK / emoji across read boundaries).
+
+Text frames carry JSON control messages:
+
+- C→S: `{type:"resize",cols,rows}` (`attach` is also defined but the URL query is sufficient — client doesn't need to send it).
+- S→C: `attached` (after WS open), `cursor` (heartbeat for `lastSeq`), `lifecycle` (`child-exit` / `child-respawn`), `exit` (only when the session itself goes away).
+
+`lastSeq` is persisted per-wsId in `localStorage` so a browser reload reattaches and replays the missed window.
+
+## Reset
+
+To start over from scratch:
+
+```bash
+rm -rf $HOME/.auto-quant-launcher
+```
+
+This wipes the registry, all per-workspace clones, and the shared data cache. Next launcher boot re-seeds `data/` from the template.
+
+## What's deliberately not here yet
+
+- `results.tsv` rendered as a live table, Sharpe trajectory chart, per-strategy analysis — too early to commit to a UI for these
+- Multi-user / remote access / auth / TLS — localhost only
+- File editing — the agent owns the files; we display only
+- Workspace import from an existing branch — only "new from template"
+- Generalised harness schema — Auto-Quant constants live in the bootstrap script; swap the script to retarget
 
 ## Layout
 
 ```
-server/  # ws + node-pty PTY broker
-client/  # Vite + React + xterm.js
+server/
+  scripts/bootstrap-auto-quant.sh   ← the lifecycle knowledge
+  src/
+    index.ts                        ← HTTP + WS entrypoint
+    config.ts                       ← env → typed config
+    spawn-env.ts                    ← strips terminal-id env leaks (TERM_PROGRAM=vscode etc)
+    workspace-registry.ts           ← atomic JSON store
+    workspace-creator.ts            ← spawns bootstrap script
+    bootstrap-data.ts               ← seeds shared data dir on first boot
+    persistent-session.ts           ← PTY-decoupled-from-WS, replay buffer, auto-respawn
+    session-pool.ts                 ← Map<wsId, PersistentSession>
+    replay-buffer.ts                ← ring of bytes + monotonic seq
+    git-service.ts / file-service.ts ← read-only inspection
+    protocol.ts / logger.ts
+client/
+  src/
+    App.tsx + App.css               ← two-pane shell, hash routing
+    Sidebar.tsx                     ← workspace list + "New" form
+    WorkspaceView.tsx               ← terminal + git/files panels
+    Terminal.tsx + theme.ts         ← xterm.js wrapper with keyMap
+    GitPanel.tsx / FilesPanel.tsx
+    api.ts / protocol.ts
 ```
-
-## Configuration (server)
-
-All optional. Set via env vars:
-
-| Variable                          | Default                                      | Meaning                                                                  |
-| --------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------ |
-| `PORT`                            | `8787`                                       | WS server listen port.                                                   |
-| `HOST`                            | `127.0.0.1`                                  | Bind address. Use `0.0.0.0` for LAN access (also set allowed origins!).  |
-| `WEB_TERMINAL_COMMAND`            | `$SHELL` or `/bin/zsh`                       | Command to spawn. JSON array (`["claude","--foo"]`) or whitespace argv.  |
-| `WEB_TERMINAL_CWD`                | `$HOME`                                      | Working directory for the spawned command.                               |
-| `WEB_TERMINAL_ALLOWED_ORIGINS`    | `http://localhost:5173,http://127.0.0.1:5173`| Comma-separated allowlist for the WS upgrade `Origin` header, or `*`.    |
-| `WEB_TERMINAL_BP_HIGH`            | `1048576` (1 MiB)                            | Pause PTY when `ws.bufferedAmount` exceeds this many bytes.              |
-| `WEB_TERMINAL_BP_LOW`             | `262144` (256 KiB)                           | Resume PTY when `ws.bufferedAmount` drops below this many bytes.         |
-| `WEB_TERMINAL_SHUTDOWN_MS`        | `5000`                                       | Hard-exit timeout on SIGTERM/SIGINT.                                     |
-| `WEB_TERMINAL_LOG_LEVEL`          | `info`                                       | One of `debug`, `info`, `warn`, `error`.                                 |
-
-Examples:
-
-```bash
-# Launch claude code directly instead of a shell
-WEB_TERMINAL_COMMAND='["claude"]' pnpm dev
-
-# Allow access from another host on your LAN
-HOST=0.0.0.0 WEB_TERMINAL_ALLOWED_ORIGINS=http://192.168.1.42:5173 pnpm dev
-```
-
-## Protocol
-
-`ws://host/pty?cols=N&rows=N`
-
-| Direction       | Frame type | Meaning                                |
-| --------------- | ---------- | -------------------------------------- |
-| client → server | binary     | stdin bytes (UTF-8) to the PTY         |
-| client → server | text/JSON  | control: `{type:"resize",cols,rows}`   |
-| server → client | binary     | raw stdout/stderr bytes from the PTY   |
-| server → client | text/JSON  | control: `ready` on spawn, `exit` on close |
-
-Server→client PTY bytes are **raw** (not re-decoded). xterm.js does streaming UTF-8 decoding on the client, so multi-byte characters (CJK, emoji) split across OS read boundaries don't produce mojibake.
-
-## Key remapping
-
-`TerminalView` accepts a `keyMap` prop that intercepts keystrokes **before** xterm.js sees them, then sends the mapped bytes straight to the PTY. Architecturally this is the same layer as VSCode's `keybindings.json` for the integrated terminal — it sits above xterm.js, not inside it.
-
-```tsx
-<TerminalView keyMap={{
-  'shift+enter': '\x1b\r',   // Claude Code multiline (iTerm2-style)
-  'alt+enter':   '\x1b\r',   // same, alternate binding
-  'ctrl+k':      '\x0c',     // example: rebind anything
-}} />
-```
-
-Signature format: lowercase modifiers in the order `ctrl+alt+shift+meta`, then the key (`event.key.toLowerCase()` — e.g. `enter`, `tab`, `arrowup`, `f1`, `a`, ` `).
-
-The `TerminalView` component **ships no default mapping** — that's deliberate. Hardcoding app-specific bytes inside a generic terminal would break neutral apps (e.g. bash's readline interprets `\x1b\r` as Meta+Enter). The default mapping in `App.tsx` is a *consumer* choice for this specific app. Drop the prop or pass `{}` to disable.
-
-## Origin policy
-
-The server checks the `Origin` header on the WS upgrade. Browsers always send one; non-browser clients (curl, ws CLI tools) typically don't and are allowed through (treated as same-origin). To open the LAN/internet, set `WEB_TERMINAL_ALLOWED_ORIGINS` explicitly or pass `*` to disable the check.
