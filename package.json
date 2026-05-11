@@ -1,0 +1,24 @@
+{
+  "name": "web-terminal",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Browser-based terminal: Vite + React + xterm.js front-end talking over WebSocket to a node-pty back-end.",
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm -r --parallel run dev",
+    "build": "pnpm -r run build",
+    "typecheck": "pnpm -r run typecheck",
+    "clean": "pnpm -r exec rm -rf node_modules dist .vite"
+  },
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  },
+  "packageManager": "pnpm@10.29.2",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "node-pty"
+    ]
+  }
+}
