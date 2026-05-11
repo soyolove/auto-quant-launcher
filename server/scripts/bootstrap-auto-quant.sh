@@ -45,6 +45,11 @@ mkdir -p user_data
 rm -rf user_data/data
 ln -s "$AQ_SHARED_DATA_DIR" user_data/data
 
+# Auto-Quant's .gitignore has `user_data/data/` (trailing slash = dir-only),
+# which doesn't match the symlink file at `user_data/data`. Add a per-clone
+# exclude so the launcher's "git status" panel doesn't carry that noise row.
+echo 'user_data/data' >> .git/info/exclude
+
 # 4. results.tsv header — the agent appends rows from here on out.
 printf 'commit\tevent\tstrategy_name\tsharpe\tmax_dd\tnote\n' > results.tsv
 

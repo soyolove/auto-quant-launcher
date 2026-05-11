@@ -4,6 +4,8 @@ import { URL } from 'node:url';
 import { WebSocketServer, type WebSocket } from 'ws';
 
 import { loadConfig, type ServerConfig } from './config.js';
+import { listDir, PathTraversal } from './file-service.js';
+import { gitLog, gitStatus } from './git-service.js';
 import { logger } from './logger.js';
 import { SessionPool } from './session-pool.js';
 import { buildSpawnEnv } from './spawn-env.js';
@@ -102,17 +104,58 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     return sendJson(res, 405, { error: 'method_not_allowed' });
   }
 
-  const idMatch = path.match(/^\/api\/workspaces\/([a-zA-Z0-9_-]+)$/);
+  const idMatch = path.match(/^\/api\/workspaces\/([a-zA-Z0-9_-]+)(\/(?:git\/log|git\/status|files))?$/);
   if (idMatch && idMatch[1]) {
     const id = idMatch[1];
-    if (method === 'DELETE') {
-      pool.dispose(id, 'workspace deleted');
-      const removed = await registry.remove(id);
-      if (!removed) return sendJson(res, 404, { error: 'not_found' });
-      logger.info('workspace.removed', { id, dir: removed.dir });
-      return sendJson(res, 200, { ok: true });
+    const sub = idMatch[2] ?? null;
+    const meta = registry.get(id);
+
+    if (sub === null) {
+      if (method === 'DELETE') {
+        pool.dispose(id, 'workspace deleted');
+        const removed = await registry.remove(id);
+        if (!removed) return sendJson(res, 404, { error: 'not_found' });
+        logger.info('workspace.removed', { id, dir: removed.dir });
+        return sendJson(res, 200, { ok: true });
+      }
+      return sendJson(res, 405, { error: 'method_not_allowed' });
     }
-    return sendJson(res, 405, { error: 'method_not_allowed' });
+
+    if (!meta) return sendJson(res, 404, { error: 'not_found' });
+    if (method !== 'GET') return sendJson(res, 405, { error: 'method_not_allowed' });
+
+    if (sub === '/git/log') {
+      const limit = Number.parseInt(url.searchParams.get('limit') ?? '30', 10);
+      try {
+        const entries = await gitLog(meta.dir, Number.isFinite(limit) ? limit : 30);
+        return sendJson(res, 200, { entries });
+      } catch (err) {
+        logger.warn('git.log_failed', { id, err });
+        return sendJson(res, 500, { error: 'git_failed', message: (err as Error).message });
+      }
+    }
+    if (sub === '/git/status') {
+      try {
+        const status = await gitStatus(meta.dir);
+        return sendJson(res, 200, status);
+      } catch (err) {
+        logger.warn('git.status_failed', { id, err });
+        return sendJson(res, 500, { error: 'git_failed', message: (err as Error).message });
+      }
+    }
+    if (sub === '/files') {
+      const p = url.searchParams.get('path') ?? '';
+      try {
+        const listing = await listDir(meta.dir, p);
+        return sendJson(res, 200, listing);
+      } catch (err) {
+        if (err instanceof PathTraversal) {
+          return sendJson(res, 400, { error: 'invalid_path', message: err.message });
+        }
+        logger.warn('files.list_failed', { id, path: p, err });
+        return sendJson(res, 500, { error: 'list_failed', message: (err as Error).message });
+      }
+    }
   }
 
   sendJson(res, 404, { error: 'not_found' });

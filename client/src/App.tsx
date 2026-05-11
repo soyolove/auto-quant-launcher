@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
 
 import { Sidebar } from './Sidebar';
-import { TerminalView, type KeyMap } from './Terminal';
+import type { KeyMap } from './Terminal';
+import { WorkspaceView } from './WorkspaceView';
 import './App.css';
 
 /**
@@ -56,7 +57,7 @@ export function App(): ReactElement {
       <Sidebar selectedId={selectedId} onSelect={select} />
       <section className="main-pane">
         {selectedId ? (
-          <TerminalView key={selectedId} wsId={selectedId} keyMap={APP_KEY_MAP} />
+          <WorkspaceView key={selectedId} wsId={selectedId} keyMap={APP_KEY_MAP} />
         ) : (
           <div className="empty-pane">
             <h2>web-terminal</h2>

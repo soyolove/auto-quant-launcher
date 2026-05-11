@@ -54,3 +54,59 @@ export async function deleteWorkspace(id: string): Promise<boolean> {
   });
   return res.ok;
 }
+
+// ── git ──────────────────────────────────────────────────────────────────────
+
+export interface GitLogEntry {
+  readonly hash: string;
+  readonly subject: string;
+  readonly relTime: string;
+  readonly authorTime: string;
+}
+
+export interface GitStatusFile {
+  readonly path: string;
+  readonly status: string;
+}
+
+export interface GitStatus {
+  readonly branch: string | null;
+  readonly clean: boolean;
+  readonly files: readonly GitStatusFile[];
+}
+
+export async function getGitLog(id: string, limit = 30): Promise<GitLogEntry[]> {
+  const res = await fetch(
+    `/api/workspaces/${encodeURIComponent(id)}/git/log?limit=${limit}`,
+  );
+  if (!res.ok) throw new Error(`git log failed: ${res.status}`);
+  const body = (await res.json()) as { entries: GitLogEntry[] };
+  return body.entries;
+}
+
+export async function getGitStatus(id: string): Promise<GitStatus> {
+  const res = await fetch(`/api/workspaces/${encodeURIComponent(id)}/git/status`);
+  if (!res.ok) throw new Error(`git status failed: ${res.status}`);
+  return (await res.json()) as GitStatus;
+}
+
+// ── files ────────────────────────────────────────────────────────────────────
+
+export interface FileEntry {
+  readonly name: string;
+  readonly kind: 'file' | 'dir' | 'symlink' | 'other';
+  readonly sizeBytes: number | null;
+  readonly mtime: string;
+}
+
+export interface DirListing {
+  readonly path: string;
+  readonly entries: readonly FileEntry[];
+}
+
+export async function listFiles(id: string, relPath: string): Promise<DirListing> {
+  const qs = relPath ? `?path=${encodeURIComponent(relPath)}` : '';
+  const res = await fetch(`/api/workspaces/${encodeURIComponent(id)}/files${qs}`);
+  if (!res.ok) throw new Error(`list files failed: ${res.status}`);
+  return (await res.json()) as DirListing;
+}
