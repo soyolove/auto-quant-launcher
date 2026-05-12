@@ -1,5 +1,5 @@
 {
-  "name": "web-terminal",
+  "name": "auto-quant-launcher",
   "private": true,
   "version": "0.1.0",
   "description": "Browser-based terminal: Vite + React + xterm.js front-end talking over WebSocket to a node-pty back-end.",

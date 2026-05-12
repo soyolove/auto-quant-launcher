@@ -11,7 +11,7 @@
  * even though our `\x1b\r` bytes arrive at the PTY correctly.
  *
  * Fix: strip every terminal-identification env var the parent shell might
- * have, then announce ourselves with `TERM_PROGRAM=web-terminal`.
+ * have, then announce ourselves with `TERM_PROGRAM=auto-quant-launcher`.
  */
 
 const STRIP_EXACT = new Set<string>([
@@ -46,7 +46,7 @@ export function buildSpawnEnv(
   // Announce ourselves honestly so well-behaved TUI apps can detect us.
   out['TERM'] = 'xterm-256color';
   out['COLORTERM'] = 'truecolor';
-  out['TERM_PROGRAM'] = 'web-terminal';
+  out['TERM_PROGRAM'] = 'auto-quant-launcher';
   out['TERM_PROGRAM_VERSION'] = SELF_VERSION;
   // Caller-supplied per-session env (e.g. AQ_WS_ID, AQ_LAUNCHER_REPO_ROOT)
   // wins over the inherited env so .mcp.json `${VAR}` expansion at Claude
