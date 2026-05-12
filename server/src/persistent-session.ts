@@ -9,7 +9,12 @@ import {
 import { ReplayBuffer } from './replay-buffer.js';
 
 export interface PersistentSessionOptions {
+  /** The workspace this session belongs to (for routing, logging, cwd context). */
   readonly wsId: string;
+  /** Launcher-owned UUID identifying this PTY in the pool. */
+  readonly sessionToken: string;
+  /** Display name for tab UI (e.g. "s1", "s2"). Lifetime-scoped, not persisted. */
+  readonly name: string;
   readonly command: readonly string[];
   readonly cwd: string;
   readonly env: { [key: string]: string };
@@ -61,10 +66,16 @@ export class PersistentSession {
   private currentRows: number;
   private respawnTimes: number[] = [];
   private respawnTimer: NodeJS.Timeout | null = null;
+  /** claude-assigned UUID, discovered by watching the JSONL filename. Null until detected (M4). */
+  private _claudeSessionId: string | null = null;
 
   constructor(opts: PersistentSessionOptions) {
     this.opts = opts;
-    this.log = opts.logger.child({ wsId: opts.wsId });
+    this.log = opts.logger.child({
+      wsId: opts.wsId,
+      sessionToken: opts.sessionToken,
+      name: opts.name,
+    });
     this.buffer = new ReplayBuffer(opts.replayBufferBytes);
     this.currentCols = clamp(opts.initialCols, 1, MAX_DIM);
     this.currentRows = clamp(opts.initialRows, 1, MAX_DIM);
@@ -162,6 +173,29 @@ export class PersistentSession {
     return this.opts.command;
   }
 
+  get wsId(): string {
+    return this.opts.wsId;
+  }
+
+  get sessionToken(): string {
+    return this.opts.sessionToken;
+  }
+
+  get name(): string {
+    return this.opts.name;
+  }
+
+  get claudeSessionId(): string | null {
+    return this._claudeSessionId;
+  }
+
+  /** Called when JSONL-watching detects which transcript this PTY is writing to. */
+  setClaudeSessionId(id: string): void {
+    if (this._claudeSessionId !== null) return;
+    this._claudeSessionId = id;
+    this.log.info('session.claude_id_detected', { claudeSessionId: id });
+  }
+
   /** Swap in `ws` as the attached client; kick the previous one if any. */
   attach(ws: WebSocket, cols: number, rows: number, since: number | undefined): void {
     if (this.disposed) {
@@ -203,6 +237,9 @@ export class PersistentSession {
     const attached: ServerControlMessage = {
       type: 'attached',
       wsId: this.opts.wsId,
+      sessionToken: this.opts.sessionToken,
+      name: this.opts.name,
+      claudeSessionId: this._claudeSessionId,
       pid: this.term.pid,
       command: this.opts.command,
       replayFromSeq: slice.effectiveSeq,

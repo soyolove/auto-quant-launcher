@@ -37,6 +37,12 @@ export type ClientControlMessage = AttachMessage | ResizeMessage;
 export interface AttachedMessage {
   readonly type: 'attached';
   readonly wsId: string;
+  /** Launcher-owned PTY identity (multi-session routing key). */
+  readonly sessionToken: string;
+  /** Display name for tabs (e.g. "s1"). Server-lifetime scoped, not persisted. */
+  readonly name: string;
+  /** claude-assigned UUID once discovered. Null on initial spawn (~100ms-2s window). */
+  readonly claudeSessionId: string | null;
   readonly pid: number;
   readonly command: readonly string[];
   /** Seq the replay bytes (sent as binary frames just before this) start at. */

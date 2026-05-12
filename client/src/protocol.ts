@@ -26,6 +26,9 @@ export type ClientControlMessage = AttachMessage | ResizeMessage;
 export interface AttachedMessage {
   readonly type: 'attached';
   readonly wsId: string;
+  readonly sessionToken: string;
+  readonly name: string;
+  readonly claudeSessionId: string | null;
   readonly pid: number;
   readonly command: readonly string[];
   readonly replayFromSeq: number;
@@ -80,6 +83,9 @@ export function parseServerControl(text: string): ServerControlMessage | null {
     case 'attached':
       if (
         typeof v['wsId'] === 'string' &&
+        typeof v['sessionToken'] === 'string' &&
+        typeof v['name'] === 'string' &&
+        (typeof v['claudeSessionId'] === 'string' || v['claudeSessionId'] === null) &&
         typeof v['pid'] === 'number' &&
         Array.isArray(v['command']) &&
         v['command'].every((c) => typeof c === 'string') &&
@@ -90,6 +96,9 @@ export function parseServerControl(text: string): ServerControlMessage | null {
         return {
           type: 'attached',
           wsId: v['wsId'],
+          sessionToken: v['sessionToken'],
+          name: v['name'],
+          claudeSessionId: v['claudeSessionId'] as string | null,
           pid: v['pid'],
           command: v['command'] as string[],
           replayFromSeq: v['replayFromSeq'],
