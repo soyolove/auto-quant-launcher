@@ -70,7 +70,13 @@ export function Sidebar(props: SidebarProps): ReactElement {
   const onStop = async (id: string, tag: string): Promise<void> => {
     if (!window.confirm(`Stop the agent for "${tag}"? The conversation history on disk is preserved; click ↻ later to resume.`)) return;
     const ok = await stopWorkspace(id);
-    if (ok) props.onChanged();
+    if (ok) {
+      props.onChanged();
+      // Match onDelete UX: if the stopped workspace was the active one,
+      // navigate back to the launcher's empty pane so the user sees a
+      // clear "done" state instead of a frozen xterm.
+      if (props.selectedId === id) props.onSelect('');
+    }
   };
 
   const onDelete = async (id: string): Promise<void> => {
