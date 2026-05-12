@@ -194,6 +194,34 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+.sidebar-sessions {
+  font-size: 10px;
+  color: var(--accent);
+  background: rgba(121, 192, 255, 0.12);
+  padding: 1px 5px;
+  border-radius: 8px;
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.sidebar-continue {
+  background: none;
+  border: 0;
+  color: var(--fg-dim);
+  padding: 0 6px;
+  cursor: pointer;
+  font-size: 14px;
+  opacity: 0;
+  transition: opacity 80ms, color 80ms;
+}
+.sidebar-row:hover .sidebar-continue,
+.sidebar-row.is-selected .sidebar-continue {
+  opacity: 1;
+}
+.sidebar-continue:hover {
+  color: var(--accent);
+}
+
 .sidebar-delete {
   background: none;
   border: 0;

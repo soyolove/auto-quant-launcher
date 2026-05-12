@@ -11,6 +11,8 @@ export interface Workspace {
   readonly createdAt: string;
   readonly claudeRunning: boolean;
   readonly template?: string;
+  /** Count of Claude Code session transcripts on disk for this workspace. */
+  readonly sessionCount: number;
 }
 
 export interface CreateError {
@@ -65,6 +67,22 @@ export async function listTemplates(): Promise<TemplateInfo[]> {
   if (!res.ok) throw new Error(`list templates failed: ${res.status}`);
   const body = (await res.json()) as { templates: TemplateInfo[] };
   return body.templates;
+}
+
+// ── sessions (Claude Code transcripts on disk) ───────────────────────────────
+
+export interface SessionMeta {
+  readonly sessionId: string;
+  readonly file: string;
+  readonly mtime: string;
+  readonly sizeBytes: number;
+}
+
+export async function listSessions(id: string): Promise<SessionMeta[]> {
+  const res = await fetch(`/api/workspaces/${encodeURIComponent(id)}/sessions`);
+  if (!res.ok) throw new Error(`list sessions failed: ${res.status}`);
+  const body = (await res.json()) as { sessions: SessionMeta[] };
+  return body.sessions;
 }
 
 export async function deleteWorkspace(id: string): Promise<boolean> {

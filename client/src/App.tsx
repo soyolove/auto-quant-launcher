@@ -39,6 +39,13 @@ function writeSelectedToHash(id: string | null): void {
 
 export function App(): ReactElement {
   const [selectedId, setSelectedId] = useState<string | null>(readSelectedFromHash());
+  /**
+   * Per-attach resume intent, transient. Tied to `selectedId` (matching pair).
+   * Set to `'last'` when the user explicitly clicks the "↻ continue" button;
+   * cleared on any other selection change. Forms part of the `WorkspaceView`
+   * key so toggling it forces a remount + fresh WS attach.
+   */
+  const [resumeIntent, setResumeIntent] = useState<'last' | string | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [templates, setTemplates] = useState<TemplateInfo[]>([]);
   const [listError, setListError] = useState<string | null>(null);
@@ -72,10 +79,11 @@ export function App(): ReactElement {
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
-  const select = (id: string): void => {
+  const select = (id: string, resume: 'last' | string | null = null): void => {
     const next = id.length > 0 ? id : null;
     writeSelectedToHash(next);
     setSelectedId(next);
+    setResumeIntent(resume);
   };
 
   const selected = selectedId ? workspaces.find((w) => w.id === selectedId) : undefined;
@@ -87,16 +95,18 @@ export function App(): ReactElement {
         templates={templates}
         listError={listError}
         selectedId={selectedId}
-        onSelect={select}
+        onSelect={(id) => select(id, null)}
+        onContinue={(id) => select(id, 'last')}
         onChanged={() => void refresh()}
       />
       <section className="main-pane">
         {selectedId ? (
           <WorkspaceView
-            key={selectedId}
+            key={`${selectedId}:${resumeIntent ?? 'attach'}`}
             wsId={selectedId}
             label={selected?.tag ?? selectedId}
             keyMap={APP_KEY_MAP}
+            {...(resumeIntent !== null ? { resume: resumeIntent } : {})}
           />
         ) : (
           <div className="empty-pane">

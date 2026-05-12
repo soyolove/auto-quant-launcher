@@ -8,7 +8,8 @@ import { loadConfig, type ServerConfig } from './config.js';
 import { listDir, PathTraversal } from './file-service.js';
 import { gitLog, gitStatus } from './git-service.js';
 import { logger } from './logger.js';
-import { SessionPool } from './session-pool.js';
+import { countSessions, discoverSessions } from './session-discovery.js';
+import { SessionPool, type SessionFactoryContext } from './session-pool.js';
 import { buildSpawnEnv } from './spawn-env.js';
 import { TemplateRegistry } from './template-registry.js';
 import { WorkspaceCreator } from './workspace-creator.js';
@@ -58,11 +59,11 @@ const creator = new WorkspaceCreator({
 });
 
 const pool = new SessionPool(
-  (wsId) => {
+  (wsId, ctx) => {
     const ws = registry.get(wsId);
     if (!ws) throw new Error(`workspace not found: ${wsId}`);
     return {
-      command: config.command,
+      command: composeCommand(config.command, ctx),
       cwd: ws.dir,
       env: buildSpawnEnv(process.env, {
         AQ_WS_ID: wsId,
@@ -116,9 +117,8 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
 
   if (path === '/api/workspaces') {
     if (method === 'GET') {
-      return sendJson(res, 200, {
-        workspaces: registry.list().map((w) => publicMeta(w)),
-      });
+      const workspaces = await Promise.all(registry.list().map((w) => publicMeta(w)));
+      return sendJson(res, 200, { workspaces });
     }
     if (method === 'POST') {
       const body = await readJsonBody(req);
@@ -156,12 +156,12 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
           stderr: 'stderr' in result ? result.stderr.slice(-4000) : undefined,
         });
       }
-      return sendJson(res, 201, { workspace: publicMeta(result.workspace) });
+      return sendJson(res, 201, { workspace: await publicMeta(result.workspace) });
     }
     return sendJson(res, 405, { error: 'method_not_allowed' });
   }
 
-  const idMatch = path.match(/^\/api\/workspaces\/([a-zA-Z0-9_-]+)(\/(?:git\/log|git\/status|files))?$/);
+  const idMatch = path.match(/^\/api\/workspaces\/([a-zA-Z0-9_-]+)(\/(?:git\/log|git\/status|files|sessions))?$/);
   if (idMatch && idMatch[1]) {
     const id = idMatch[1];
     const sub = idMatch[2] ?? null;
@@ -211,6 +211,15 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
         return sendJson(res, 500, { error: 'git_failed', message: (err as Error).message });
       }
     }
+    if (sub === '/sessions') {
+      try {
+        const sessions = await discoverSessions(meta.dir);
+        return sendJson(res, 200, { sessions });
+      } catch (err) {
+        logger.warn('sessions.discovery_failed', { id, err });
+        return sendJson(res, 500, { error: 'discovery_failed', message: (err as Error).message });
+      }
+    }
     if (sub === '/files') {
       const p = url.searchParams.get('path') ?? '';
       try {
@@ -229,8 +238,11 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   sendJson(res, 404, { error: 'not_found' });
 }
 
-function publicMeta(w: WorkspaceMeta): WorkspaceMeta & { readonly claudeRunning: boolean } {
-  return { ...w, claudeRunning: pool.isClaudeRunning(w.id) };
+async function publicMeta(
+  w: WorkspaceMeta,
+): Promise<WorkspaceMeta & { readonly claudeRunning: boolean; readonly sessionCount: number }> {
+  const sessionCount = await countSessions(w.dir).catch(() => 0);
+  return { ...w, claudeRunning: pool.isClaudeRunning(w.id), sessionCount };
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -288,6 +300,7 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage, url: URL) => {
   const rows = clampQuery(url.searchParams.get('rows'), 24, 1, 1000);
   const sinceRaw = url.searchParams.get('since');
   const since = sinceRaw === null ? undefined : parseSince(sinceRaw);
+  const resume = parseResume(url.searchParams.get('resume'));
 
   if (!wsId) {
     logger.warn('upgrade.missing_ws_id');
@@ -305,12 +318,13 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage, url: URL) => {
     cols,
     rows,
     since: since ?? null,
+    resume: resume === undefined ? null : resume === 'last' ? 'last' : resume.sessionId,
     origin: req.headers.origin ?? null,
     remoteAddress: req.socket.remoteAddress ?? null,
   });
 
   try {
-    pool.attach(wsId, ws, cols, rows, since);
+    pool.attach(wsId, ws, cols, rows, since, resume === undefined ? {} : { resume });
   } catch (err) {
     logger.error('pool.attach_failed', { wsId, err });
     try { ws.close(1011, 'attach failed'); } catch { /* ignore */ }
@@ -384,4 +398,28 @@ function parseSince(raw: string): number | undefined {
   const n = Number.parseInt(raw, 10);
   if (!Number.isFinite(n) || n < 0) return undefined;
   return n;
+}
+
+const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function parseResume(raw: string | null): SessionFactoryContext['resume'] {
+  if (raw === null || raw === '') return undefined;
+  if (raw === 'last') return 'last';
+  if (SESSION_ID_RE.test(raw)) return { sessionId: raw };
+  return undefined;
+}
+
+/**
+ * Compose the spawn command from the configured base + per-attach resume
+ * intent. Only the base claude-style flags `--continue` and `--resume <id>`
+ * are supported; the user is free to set WEB_TERMINAL_COMMAND to anything
+ * but the resume flags only make sense if the binary accepts them.
+ */
+function composeCommand(
+  base: readonly string[],
+  ctx: SessionFactoryContext,
+): readonly string[] {
+  if (ctx.resume === undefined) return base;
+  if (ctx.resume === 'last') return [...base, '--continue'];
+  return [...base, '--resume', ctx.resume.sessionId];
 }

@@ -17,6 +17,8 @@ export interface SidebarProps {
   readonly listError: string | null;
   readonly selectedId: string | null;
   readonly onSelect: (id: string) => void;
+  /** Click the ↻ button: select the workspace AND signal "continue last session". */
+  readonly onContinue: (id: string) => void;
   /** Called after a successful create or delete so the parent can refetch. */
   readonly onChanged: () => void;
 }
@@ -123,34 +125,55 @@ export function Sidebar(props: SidebarProps): ReactElement {
           <li className="sidebar-empty">no workspaces yet</li>
         )}
         {props.listError && <li className="sidebar-error">{props.listError}</li>}
-        {props.workspaces.map((w) => (
-          <li
-            key={w.id}
-            className={`sidebar-row ${w.id === props.selectedId ? 'is-selected' : ''}`}
-          >
-            <button
-              type="button"
-              className="sidebar-row-main"
-              onClick={() => props.onSelect(w.id)}
+        {props.workspaces.map((w) => {
+          const canResume = !w.claudeRunning && w.sessionCount > 0;
+          return (
+            <li
+              key={w.id}
+              className={`sidebar-row ${w.id === props.selectedId ? 'is-selected' : ''}`}
             >
-              <span
-                className="sidebar-status-dot"
-                style={{ background: w.claudeRunning ? '#7ee787' : '#6e7681' }}
-                title={w.claudeRunning ? 'agent running' : 'idle'}
-              />
-              <span className="sidebar-tag">{w.tag}</span>
-              <span className="sidebar-meta">{relativeTime(w.createdAt)}</span>
-            </button>
-            <button
-              type="button"
-              className="sidebar-delete"
-              title="delete"
-              onClick={() => void onDelete(w.id)}
-            >
-              ×
-            </button>
-          </li>
-        ))}
+              <button
+                type="button"
+                className="sidebar-row-main"
+                onClick={() => props.onSelect(w.id)}
+              >
+                <span
+                  className="sidebar-status-dot"
+                  style={{ background: w.claudeRunning ? '#7ee787' : '#6e7681' }}
+                  title={w.claudeRunning ? 'agent running' : 'idle'}
+                />
+                <span className="sidebar-tag">{w.tag}</span>
+                {w.sessionCount > 0 && (
+                  <span
+                    className="sidebar-sessions"
+                    title={`${w.sessionCount} session${w.sessionCount === 1 ? '' : 's'} on disk`}
+                  >
+                    {w.sessionCount}s
+                  </span>
+                )}
+                <span className="sidebar-meta">{relativeTime(w.createdAt)}</span>
+              </button>
+              {canResume && (
+                <button
+                  type="button"
+                  className="sidebar-continue"
+                  title="continue last session (claude --continue)"
+                  onClick={() => props.onContinue(w.id)}
+                >
+                  ↻
+                </button>
+              )}
+              <button
+                type="button"
+                className="sidebar-delete"
+                title="delete"
+                onClick={() => void onDelete(w.id)}
+              >
+                ×
+              </button>
+            </li>
+          );
+        })}
       </ul>
     </aside>
   );

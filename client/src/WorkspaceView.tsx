@@ -8,6 +8,7 @@ export interface WorkspaceViewProps {
   readonly wsId: string;
   readonly label?: string;
   readonly keyMap?: KeyMap;
+  readonly resume?: 'last' | string;
 }
 
 export function WorkspaceView(props: WorkspaceViewProps): ReactElement {
@@ -16,6 +17,7 @@ export function WorkspaceView(props: WorkspaceViewProps): ReactElement {
     wsId: props.wsId,
     ...(props.label !== undefined ? { label: props.label } : {}),
     ...(props.keyMap !== undefined ? { keyMap: props.keyMap } : {}),
+    ...(props.resume !== undefined ? { resume: props.resume } : {}),
   };
 
   return (

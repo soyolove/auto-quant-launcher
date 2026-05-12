@@ -51,6 +51,14 @@ export interface TerminalViewProps {
    * tear down the WebSocket — updates apply on the next keystroke.
    */
   readonly keyMap?: KeyMap;
+  /**
+   * If set, included in the WS URL as `?resume=...`. Only takes effect when
+   * the server has no PersistentSession yet for this wsId (i.e. a fresh
+   * spawn); once a PTY is running, the server ignores resume on subsequent
+   * attaches. `"last"` → `claude --continue`; any other string is passed
+   * through as a sessionId for `claude --resume <id>`.
+   */
+  readonly resume?: 'last' | string;
 }
 
 export function TerminalView(props: TerminalViewProps): ReactElement {
@@ -119,6 +127,9 @@ export function TerminalView(props: TerminalViewProps): ReactElement {
       cols: String(lastCols),
       rows: String(lastRows),
     });
+    if (props.resume !== undefined && props.resume !== '') {
+      params.set('resume', props.resume);
+    }
     const url = `${wsUrl ?? defaultWsUrl()}?${params.toString()}`;
     const ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';
@@ -220,7 +231,7 @@ export function TerminalView(props: TerminalViewProps): ReactElement {
       webgl?.dispose();
       term.dispose();
     };
-  }, [wsId, wsUrl]);
+  }, [wsId, wsUrl, props.resume]);
 
   return (
     <div className="terminal-shell">
