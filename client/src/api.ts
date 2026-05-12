@@ -92,6 +92,18 @@ export async function deleteWorkspace(id: string): Promise<boolean> {
   return res.ok;
 }
 
+/**
+ * Kill the PTY for this workspace. Server-side PersistentSession disposes,
+ * memory is freed, on-disk Claude Code session JSONLs are preserved. The
+ * workspace itself stays in the registry. Idempotent.
+ */
+export async function stopWorkspace(id: string): Promise<boolean> {
+  const res = await fetch(`/api/workspaces/${encodeURIComponent(id)}/stop`, {
+    method: 'POST',
+  });
+  return res.ok;
+}
+
 // ── git ──────────────────────────────────────────────────────────────────────
 
 export interface GitLogEntry {

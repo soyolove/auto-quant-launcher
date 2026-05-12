@@ -4,6 +4,7 @@ import type { FormEvent, ReactElement } from 'react';
 import {
   createWorkspace,
   deleteWorkspace,
+  stopWorkspace,
   type TemplateInfo,
   type Workspace,
 } from './api';
@@ -64,6 +65,12 @@ export function Sidebar(props: SidebarProps): ReactElement {
         `HTTP ${result.status}`;
       setCreateError(msg);
     }
+  };
+
+  const onStop = async (id: string, tag: string): Promise<void> => {
+    if (!window.confirm(`Stop the agent for "${tag}"? The conversation history on disk is preserved; click ↻ later to resume.`)) return;
+    const ok = await stopWorkspace(id);
+    if (ok) props.onChanged();
   };
 
   const onDelete = async (id: string): Promise<void> => {
@@ -140,7 +147,7 @@ export function Sidebar(props: SidebarProps): ReactElement {
                 <span
                   className="sidebar-status-dot"
                   style={{ background: w.claudeRunning ? '#7ee787' : '#6e7681' }}
-                  title={w.claudeRunning ? 'agent running' : 'idle'}
+                  title={w.claudeRunning ? 'agent running' : 'stopped'}
                 />
                 <span className="sidebar-tag">{w.tag}</span>
                 {w.sessionCount > 0 && (
@@ -161,6 +168,16 @@ export function Sidebar(props: SidebarProps): ReactElement {
                   onClick={() => props.onContinue(w.id)}
                 >
                   ↻
+                </button>
+              )}
+              {w.claudeRunning && (
+                <button
+                  type="button"
+                  className="sidebar-stop"
+                  title="stop agent (frees memory; history preserved)"
+                  onClick={() => void onStop(w.id, w.tag)}
+                >
+                  ■
                 </button>
               )}
               <button

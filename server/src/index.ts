@@ -161,7 +161,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     return sendJson(res, 405, { error: 'method_not_allowed' });
   }
 
-  const idMatch = path.match(/^\/api\/workspaces\/([a-zA-Z0-9_-]+)(\/(?:git\/log|git\/status|files|sessions))?$/);
+  const idMatch = path.match(/^\/api\/workspaces\/([a-zA-Z0-9_-]+)(\/(?:git\/log|git\/status|files|sessions|stop))?$/);
   if (idMatch && idMatch[1]) {
     const id = idMatch[1];
     const sub = idMatch[2] ?? null;
@@ -190,6 +190,14 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     }
 
     if (!meta) return sendJson(res, 404, { error: 'not_found' });
+
+    if (sub === '/stop') {
+      if (method !== 'POST') return sendJson(res, 405, { error: 'method_not_allowed' });
+      const wasRunning = pool.dispose(id, 'stop requested');
+      logger.info('workspace.stopped', { id, dir: meta.dir, wasRunning });
+      return sendJson(res, 200, { ok: true, wasRunning });
+    }
+
     if (method !== 'GET') return sendJson(res, 405, { error: 'method_not_allowed' });
 
     if (sub === '/git/log') {
